@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Merge selected source files into one CSV with unified columns.
+Merge three source datasets into one CSV with unified columns.
 
 Sources:
 - data/raw/pnas.2303764120.sd01.xlsx
@@ -8,9 +8,13 @@ Sources:
 - data/raw/41586_2010_BFnature08920_MOESM90_ESM.xls
 
 Output columns (fixed order):
-- Species
-- wet_mass_g
-- wet_mass_kg
+- class
+- order
+- family
+- Genus
+- species
+- wet_Mass_g
+- wet_Mass_kg
 - BMR
 - BMR_unit
 - temperature
@@ -24,13 +28,18 @@ Output columns (fixed order):
 """
 
 from __future__ import annotations
-
+from species_record_stats import compute_species_point_stats
 import argparse
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+GENUS_COL = "Genus"
+SPECIES_COL = "species"
+WET_G_COL = "wet_Mass_g"
+WET_KG_COL = "wet_Mass_kg"
 
 
 def find_root(start: Optional[Path] = None, marker: str = ".gitignore") -> Path:
@@ -105,9 +114,13 @@ def numeric(series: pd.Series) -> pd.Series:
 
 def make_output_frame(length: int) -> pd.DataFrame:
     cols = [
-        "Species",
-        "wet_mass_g",
-        "wet_mass_kg",
+        "class",
+        "order",
+        "family",
+        GENUS_COL,
+        SPECIES_COL,
+        WET_G_COL,
+        WET_KG_COL,
         "BMR",
         "BMR_unit",
         "temperature",
@@ -124,17 +137,216 @@ def make_output_frame(length: int) -> pd.DataFrame:
 
 def ensure_weight_pair(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Auto-calculate wet_mass_g/wet_mass_kg if one side is missing.
+    Auto-calculate wet mass g/wet mass kg if one side is missing.
     kg = g / 1000
     g  = kg * 1000
     """
     out = df.copy()
-    g = numeric(out["wet_mass_g"])
-    kg = numeric(out["wet_mass_kg"])
+    g = numeric(out[WET_G_COL])
+    kg = numeric(out[WET_KG_COL])
 
-    out["wet_mass_kg"] = np.where(kg.notna(), kg, np.where(g.notna(), g / 1000.0, np.nan))
-    out["wet_mass_g"] = np.where(g.notna(), g, np.where(kg.notna(), kg * 1000.0, np.nan))
+    out[WET_KG_COL] = np.where(kg.notna(), kg, np.where(g.notna(), g / 1000.0, np.nan))
+    out[WET_G_COL] = np.where(g.notna(), g, np.where(kg.notna(), kg * 1000.0, np.nan))
     return out
+
+
+def convert_mass_value_unit_to_g_kg(
+    mass_value: pd.Series, mass_unit: pd.Series
+) -> tuple[pd.Series, pd.Series]:
+    value = numeric(mass_value)
+    unit = mass_unit.astype("string").str.strip().str.lower().fillna("")
+    unit = unit.str.replace(".", "", regex=False).str.replace(" ", "", regex=False)
+
+    is_kg = unit.isin(["kg", "kilogram", "kilograms"])
+    is_g = unit.isin(["g", "gram", "grams"])
+    is_mg = unit.isin(["mg", "milligram", "milligrams"])
+
+    g = np.where(is_kg, value * 1000.0, np.where(is_g, value, np.where(is_mg, value / 1000.0, np.nan)))
+    kg = np.where(is_kg, value, np.where(is_g, value / 1000.0, np.where(is_mg, value / 1_000_000.0, np.nan)))
+    return pd.Series(g), pd.Series(kg)
+
+
+def infer_unit_from_colname(colname: str) -> str:
+    name = normalize_text_value(colname).lower()
+    if "(kg)" in name or name.endswith("_kg") or " kg" in name:
+        return "kg"
+    if "(mg)" in name or name.endswith("_mg") or " mg" in name:
+        return "mg"
+    if "(g)" in name or name.endswith("_g") or " g" in name:
+        return "g"
+    return ""
+
+
+def is_mass_value_col(colname: str) -> bool:
+    name = normalize_text_value(colname).lower()
+    if "mass" not in name:
+        return False
+    deny = ["specific", "metadata", "method", "comment", "minimum", "maximum", "min", "max", "specificepithet"]
+    return not any(token in name for token in deny)
+
+
+def find_unit_col_for_value_col(df: pd.DataFrame, value_col: str) -> Optional[str]:
+    candidates = [
+        f"{value_col} - units",
+        f"{value_col}-units",
+        f"{value_col}_units",
+    ]
+    for c in candidates:
+        if c in df.columns:
+            return c
+
+    value_name = normalize_text_value(value_col).lower()
+    for col in df.columns:
+        low = normalize_text_value(col).lower()
+        if "unit" in low and value_name in low:
+            return col
+    return None
+
+
+def mass_from_candidates(
+    df: pd.DataFrame,
+    candidates: list[tuple[str, Optional[str], Optional[str]]],
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Convert mass from candidate (value_col, unit_col, default_unit) triples.
+    Returns:
+      - wet mass in g
+      - wet mass in kg
+      - raw mass fallback values (for rows still unresolved)
+    """
+    n = len(df)
+    out_g = pd.Series([np.nan] * n)
+    out_kg = pd.Series([np.nan] * n)
+    raw_fallback = pd.Series([np.nan] * n)
+
+    for value_col, unit_col, default_unit in candidates:
+        if value_col not in df.columns:
+            continue
+        values = numeric(df[value_col])
+        if unit_col is not None and unit_col in df.columns:
+            g, kg = convert_mass_value_unit_to_g_kg(values, df[unit_col])
+        else:
+            unit_guess = default_unit or infer_unit_from_colname(value_col)
+            if unit_guess == "kg":
+                g, kg = values * 1000.0, values
+            elif unit_guess == "mg":
+                g, kg = values / 1000.0, values / 1_000_000.0
+            elif unit_guess == "g":
+                g, kg = values, values / 1000.0
+            else:
+                g, kg = pd.Series([np.nan] * n), pd.Series([np.nan] * n)
+
+        g_series = pd.Series(g, index=df.index)
+        kg_series = pd.Series(kg, index=df.index)
+        values_series = pd.Series(values, index=df.index)
+
+        out_g = out_g.where(pd.to_numeric(out_g, errors="coerce").notna(), g_series)
+        out_kg = out_kg.where(pd.to_numeric(out_kg, errors="coerce").notna(), kg_series)
+        raw_fallback = raw_fallback.where(
+            pd.to_numeric(raw_fallback, errors="coerce").notna(), values_series
+        )
+
+    return out_g, out_kg, raw_fallback
+
+
+def build_general_mass_candidates(df: pd.DataFrame) -> list[tuple[str, Optional[str], Optional[str]]]:
+    """
+    Build flexible mass candidates for current and future datasets.
+    Priority:
+      1) explicit common columns
+      2) any mass-like column + matched unit column
+    """
+    candidates: list[tuple[str, Optional[str], Optional[str]]] = []
+    explicit = [
+        ("Wet Mass (g)", None, "g"),
+        ("Wet Mass (kg)", None, "kg"),
+        ("Mass (g)", None, "g"),
+        ("Mass (kg)", None, "kg"),
+        ("body mass", "body mass - units", None),
+        ("original body mass", "original body mass - units", None),
+    ]
+    for value_col, unit_col, default_unit in explicit:
+        if value_col in df.columns:
+            candidates.append((value_col, unit_col, default_unit))
+
+    for col in df.columns:
+        if not is_mass_value_col(col):
+            continue
+        unit_col = find_unit_col_for_value_col(df, col)
+        candidates.append((col, unit_col, None))
+
+    seen = set()
+    deduped: list[tuple[str, Optional[str], Optional[str]]] = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def normalize_text_value(value: object) -> str:
+    text = str(value).strip()
+    if text == "" or text.lower() == "nan":
+        return ""
+    return " ".join(text.split())
+
+
+def extract_genus_species(
+    genus_series: Optional[pd.Series],
+    species_series: Optional[pd.Series],
+    fallback_series: Optional[pd.Series] = None,
+) -> tuple[pd.Series, pd.Series]:
+    if genus_series is None and species_series is None and fallback_series is None:
+        raise ValueError("At least one species-related series must be provided.")
+
+    length = 0
+    for candidate in [genus_series, species_series, fallback_series]:
+        if candidate is not None:
+            length = len(candidate)
+            break
+    genus_out: list[object] = []
+    species_out: list[object] = []
+    for i in range(length):
+        genus = normalize_text_value(genus_series.iloc[i]) if genus_series is not None else ""
+        species = normalize_text_value(species_series.iloc[i]) if species_series is not None else ""
+        fallback = normalize_text_value(fallback_series.iloc[i]) if fallback_series is not None else ""
+
+        g = ""
+        s = ""
+        if genus and species:
+            # If species column already contains full binomial, re-split it.
+            if species.lower().startswith(f"{genus.lower()} ") or len(species.split()) >= 2:
+                parts = species.split()
+                g = parts[0]
+                s = parts[1]
+            else:
+                g = genus
+                s = species.split()[0]
+        elif fallback:
+            parts = fallback.split()
+            if len(parts) >= 2:
+                g = parts[0]
+                s = parts[1]
+        elif species and len(species.split()) >= 2:
+            parts = species.split()
+            g = parts[0]
+            s = parts[1]
+        else:
+            g = ""
+            s = ""
+
+        genus_out.append(g if g else pd.NA)
+        species_out.append(s if s else pd.NA)
+
+    return pd.Series(genus_out, dtype="string"), pd.Series(species_out, dtype="string")
+
+
+def build_full_species_series(df: pd.DataFrame) -> pd.Series:
+    genus = df[GENUS_COL].astype("string").str.strip()
+    species = df[SPECIES_COL].astype("string").str.strip()
+    full = (genus.fillna("") + " " + species.fillna("")).str.strip()
+    return full.where((genus.notna() & (genus != "") & species.notna() & (species != "")), pd.NA)
 
 
 def clean_text_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -147,22 +359,34 @@ def clean_text_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 
 def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     """
-    1) Drop rows missing any core field: wet mass, BMR, temperature.
+    1) Drop rows missing any core field:
+       Genus, species, wet_Mass_g, wet_Mass_kg, BMR, BMR_unit, temperature.
     2) Remove duplicates for biologically-equivalent records.
     """
     out = df.copy()
 
     core_mask = (
-        pd.to_numeric(out["wet_mass_g"], errors="coerce").notna()
+        out[GENUS_COL].astype("string").str.strip().notna()
+        & (out[GENUS_COL].astype("string").str.strip() != "")
+        & out[SPECIES_COL].astype("string").str.strip().notna()
+        & (out[SPECIES_COL].astype("string").str.strip() != "")
+        & pd.to_numeric(out[WET_G_COL], errors="coerce").notna()
+        & pd.to_numeric(out[WET_KG_COL], errors="coerce").notna()
         & pd.to_numeric(out["BMR"], errors="coerce").notna()
+        & out["BMR_unit"].astype("string").str.strip().notna()
+        & (out["BMR_unit"].astype("string").str.strip() != "")
         & pd.to_numeric(out["temperature"], errors="coerce").notna()
     )
     out = out.loc[core_mask].copy()
 
     dedup_cols = [
-        "Species",
-        "wet_mass_g",
-        "wet_mass_kg",
+        GENUS_COL,
+        SPECIES_COL,
+        "class",
+        "order",
+        "family",
+        WET_G_COL,
+        WET_KG_COL,
         "BMR",
         "BMR_unit",
         "temperature",
@@ -181,9 +405,18 @@ def parse_41586(path: Path) -> pd.DataFrame:
     df = read_excel_auto_header(path, sheet_name="McNab 2008 Edited.csv")
     out = make_output_frame(len(df))
 
-    out["Species"] = df["Genus Species"] if "Genus Species" in df.columns else np.nan
-    out["wet_mass_g"] = numeric(df["Mass (g)"]) if "Mass (g)" in df.columns else np.nan
-    out["wet_mass_kg"] = np.nan
+    genus_col = df["Genus"] if "Genus" in df.columns else None
+    species_col = df["Species"] if "Species" in df.columns else None
+    full_col = df["Genus Species"] if "Genus Species" in df.columns else None
+    out[GENUS_COL], out[SPECIES_COL] = extract_genus_species(genus_col, species_col, full_col)
+    out["class"] = np.nan
+    out["order"] = df["Order"] if "Order" in df.columns else np.nan
+    out["family"] = df["Family"] if "Family" in df.columns else np.nan
+
+    mass_candidates = build_general_mass_candidates(df)
+    mass_g, mass_kg, raw_mass = mass_from_candidates(df, mass_candidates)
+    out[WET_G_COL] = mass_g
+    out[WET_KG_COL] = mass_kg
     out["BMR"] = numeric(df["BMR (W)"]) if "BMR (W)" in df.columns else np.nan
     out["BMR_unit"] = np.where(pd.to_numeric(out["BMR"], errors="coerce").notna(), "W", np.nan)
     out["temperature"] = numeric(df["Temperature (C)"]) if "Temperature (C)" in df.columns else np.nan
@@ -194,6 +427,14 @@ def parse_41586(path: Path) -> pd.DataFrame:
     out["Islands"] = df["Islands"] if "Islands" in df.columns else np.nan
     out["Mountains"] = df["Mountains"] if "Mountains" in df.columns else np.nan
     out["source_file"] = path.name
+    fallback_mask = (
+        pd.to_numeric(out[WET_G_COL], errors="coerce").isna()
+        & pd.to_numeric(out["BMR"], errors="coerce").notna()
+        & pd.to_numeric(raw_mass, errors="coerce").notna()
+    )
+    # If wet/dry is unspecified but BMR exists, default unresolved mass as wet mass in grams.
+    out.loc[fallback_mask, WET_G_COL] = raw_mass.loc[fallback_mask]
+    out.loc[fallback_mask, WET_KG_COL] = raw_mass.loc[fallback_mask] / 1000.0
 
     return ensure_weight_pair(out)
 
@@ -203,15 +444,20 @@ def parse_pnas(path: Path) -> pd.DataFrame:
     df = dedupe_columns(df)
     out = make_output_frame(len(df))
 
-    if "Publication Species Name" in df.columns:
-        out["Species"] = df["Publication Species Name"]
-    elif "Species" in df.columns:
-        out["Species"] = df["Species"]
-    else:
-        out["Species"] = np.nan
+    genus_col = df["Genus"] if "Genus" in df.columns else None
+    species_col = df["Species"] if "Species" in df.columns else None
+    fallback_col = (
+        df["Publication Species Name"] if "Publication Species Name" in df.columns else None
+    )
+    out[GENUS_COL], out[SPECIES_COL] = extract_genus_species(genus_col, species_col, fallback_col)
+    out["class"] = df["Class"] if "Class" in df.columns else np.nan
+    out["order"] = df["Order"] if "Order" in df.columns else np.nan
+    out["family"] = df["Family"] if "Family" in df.columns else np.nan
 
-    out["wet_mass_g"] = numeric(df["Wet Mass (g)"]) if "Wet Mass (g)" in df.columns else np.nan
-    out["wet_mass_kg"] = np.nan
+    mass_candidates = build_general_mass_candidates(df)
+    mass_g, mass_kg, raw_mass = mass_from_candidates(df, mass_candidates)
+    out[WET_G_COL] = mass_g
+    out[WET_KG_COL] = mass_kg
 
     bmr_col = "Metabolic Rate (W, at 25C)"
     out["BMR"] = numeric(df[bmr_col]) if bmr_col in df.columns else np.nan
@@ -226,6 +472,13 @@ def parse_pnas(path: Path) -> pd.DataFrame:
     out["Islands"] = np.nan
     out["Mountains"] = np.nan
     out["source_file"] = path.name
+    fallback_mask = (
+        pd.to_numeric(out[WET_G_COL], errors="coerce").isna()
+        & pd.to_numeric(out["BMR"], errors="coerce").notna()
+        & pd.to_numeric(raw_mass, errors="coerce").notna()
+    )
+    out.loc[fallback_mask, WET_G_COL] = raw_mass.loc[fallback_mask]
+    out.loc[fallback_mask, WET_KG_COL] = raw_mass.loc[fallback_mask] / 1000.0
 
     return ensure_weight_pair(out)
 
@@ -235,17 +488,24 @@ def parse_observations(path: Path) -> pd.DataFrame:
     df = dedupe_columns(df)
     out = make_output_frame(len(df))
 
-    out["Species"] = df["species"] if "species" in df.columns else np.nan
+    genus_col = df["genus"] if "genus" in df.columns else None
+    species_col = df["specificEpithet"] if "specificEpithet" in df.columns else None
+    full_col = df["species"] if "species" in df.columns else None
+    out[GENUS_COL], out[SPECIES_COL] = extract_genus_species(genus_col, species_col, full_col)
+    out["class"] = df["class"] if "class" in df.columns else np.nan
+    out["order"] = df["order"] if "order" in df.columns else np.nan
+    out["family"] = df["family"] if "family" in df.columns else np.nan
 
-    # observations.xlsx body mass is in "body mass" with units in "body mass - units"
-    mass = numeric(df["body mass"]) if "body mass" in df.columns else pd.Series([np.nan] * len(df))
-    mass_unit = df["body mass - units"] if "body mass - units" in df.columns else pd.Series([np.nan] * len(df))
-    mass_unit = mass_unit.astype("string").str.strip().str.lower().fillna("")
+    mass_candidates = build_general_mass_candidates(df)
+    mass_g, mass_kg, raw_mass = mass_from_candidates(df, mass_candidates)
+    out[WET_G_COL] = mass_g
+    out[WET_KG_COL] = mass_kg
 
-    out["wet_mass_g"] = np.where(mass_unit == "kg", mass * 1000.0, np.where(mass_unit == "g", mass, np.nan))
-    out["wet_mass_kg"] = np.where(mass_unit == "g", mass / 1000.0, np.where(mass_unit == "kg", mass, np.nan))
-
-    mr = numeric(df["metabolic rate"]) if "metabolic rate" in df.columns else pd.Series([np.nan] * len(df))
+    mr = (
+        numeric(df["metabolic rate"])
+        if "metabolic rate" in df.columns
+        else pd.Series([np.nan] * len(df))
+    )
     mr_unit = df["metabolic rate - units"] if "metabolic rate - units" in df.columns else pd.Series([np.nan] * len(df))
     out["BMR"] = mr
     out["BMR_unit"] = np.where(pd.to_numeric(out["BMR"], errors="coerce").notna(), mr_unit, np.nan)
@@ -262,6 +522,15 @@ def parse_observations(path: Path) -> pd.DataFrame:
     out["Mountains"] = np.nan
     out["source_file"] = path.name
 
+    # If mass unit is missing/unknown but mass+BMR exist, default to wet mass in grams.
+    fallback_mask = (
+        pd.to_numeric(out[WET_G_COL], errors="coerce").isna()
+        & mr.notna()
+        & pd.to_numeric(raw_mass, errors="coerce").notna()
+    )
+    out.loc[fallback_mask, WET_G_COL] = raw_mass.loc[fallback_mask]
+    out.loc[fallback_mask, WET_KG_COL] = raw_mass.loc[fallback_mask] / 1000.0
+
     return ensure_weight_pair(out)
 
 
@@ -277,13 +546,13 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="Output CSV path (default: <base-dir>/results/merged_bmr_mass_temperature.csv).",
+        help="Output CSV path (default: <base-dir>/data/cleaning/merged_bmr_mass_temperature.csv).",
     )
     args = parser.parse_args()
 
     base_dir = args.base_dir if args.base_dir is not None else find_root()
     if args.output is None:
-        output_path = base_dir / "data" / "merged_bmr_mass_temperature.csv"
+        output_path = base_dir / "data" / "cleaning" / "merged_bmr_mass_temperature.csv"
     else:
         output_path = args.output if args.output.is_absolute() else base_dir / args.output
 
@@ -303,7 +572,11 @@ def main() -> None:
     merged = clean_text_cols(
         merged,
         [
-            "Species",
+            GENUS_COL,
+            SPECIES_COL,
+            "class",
+            "order",
+            "family",
             "BMR_unit",
             "temperature_unit",
             "Food",
@@ -328,8 +601,17 @@ def main() -> None:
     print(f"Saved: {saved_path}")
     print(f"Rows: {len(merged)}")
     print("Non-null counts:")
-    for c in ["Species", "wet_mass_g", "wet_mass_kg", "BMR", "temperature"]:
+    for c in [GENUS_COL, SPECIES_COL, WET_G_COL, WET_KG_COL, "BMR", "temperature"]:
         print(f"  {c}: {int(merged[c].notna().sum())}")
+
+    stats_df = merged.copy()
+    stats_df["__species_binomial"] = build_full_species_series(stats_df)
+    stats = compute_species_point_stats(stats_df, species_col="__species_binomial")
+    print(f"Species proportion (=1 data point): {stats['ratio_eq_1']:.4f}; rows: {stats['rows_eq_1']}")
+    print(f"Species proportion (=2 data points): {stats['ratio_eq_2']:.4f}; rows: {stats['rows_eq_2']}")
+    print(f"Species proportion (>=3 data points): {stats['ratio_ge_3']:.4f}; rows: {stats['rows_ge_3']}")
+    
+
 
 
 if __name__ == "__main__":

@@ -32,6 +32,34 @@ def normalize_tip_like_r_sub(name: str) -> str:
     return name.replace("_", " ", 1).strip()
 
 
+def load_species_txt(path: Path) -> set[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Species txt file not found: {path}")
+    names: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name = normalize_tip_like_r_sub(line.strip())
+        if name:
+            names.add(name)
+    return names
+
+
+def get_tree_species_order(tree) -> list[str]:
+    return list(
+        dict.fromkeys(
+            normalize_tip_like_r_sub(t.name) for t in tree.get_terminals() if t.name
+        )
+    )
+
+
+def prune_tree_to_species_set(tree, allowed_species: set[str]) -> tuple[int, int]:
+    before = len([t for t in tree.get_terminals() if t.name])
+    for tip in list(tree.get_terminals()):
+        if not tip.name or tip.name not in allowed_species:
+            tree.prune(target=tip)
+    after = len([t for t in tree.get_terminals() if t.name])
+    return before, after
+
+
 def format_seconds(seconds: float) -> str:
     seconds_int = max(0, int(seconds))
     minutes, sec = divmod(seconds_int, 60)
@@ -108,40 +136,21 @@ def _compute_row_block(
     return start_i, end_i, block, task_id
 
 
-def build_species_match_table(tree, csv_species: pd.Series) -> pd.DataFrame:
-    # Tree side: keep first occurrence order after normalization.
-    tree_ordered_unique = list(
-        dict.fromkeys(
-            normalize_tip_like_r_sub(t.name)
-            for t in tree.get_terminals()
-            if t.name and normalize_tip_like_r_sub(t.name)
-        )
-    )
-    # CSV side: unique species only, no row-level duplicates.
-    csv_ordered_unique_raw = list(
-        dict.fromkeys(
-            s.strip()
-            for s in csv_species.astype("string").dropna().tolist()
-            if str(s).strip() != ""
-        )
-    )
-    csv_norm_to_raw: dict[str, str] = {}
-    for raw in csv_ordered_unique_raw:
-        norm = normalize_tip_like_r_sub(raw)
-        if norm and norm not in csv_norm_to_raw:
-            csv_norm_to_raw[norm] = raw
-
+def build_species_match_table(
+    tree,
+    txt_species: set[str],
+) -> pd.DataFrame:
+    # Keep species existing in filtered tree and txt set.
+    tree_ordered_unique = get_tree_species_order(tree)
     rows: list[dict[str, str]] = []
-    for idx, tree_norm in enumerate(tree_ordered_unique, start=1):
-        if tree_norm in csv_norm_to_raw:
-            rows.append(
-                {
-                    "match_id": idx,
-                    "species_normalized": tree_norm,
-                    "tree_species": tree_norm,
-                    "csv_species": csv_norm_to_raw[tree_norm],
-                }
-            )
+    for name in tree_ordered_unique:
+        if name not in txt_species:
+            continue
+        rows.append(
+            {
+                "taxon_name": name,
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -226,32 +235,35 @@ def main() -> None:
     parser.add_argument(
         "--tree",
         type=Path,
-        default=Path("data/unique_species.nwk"),
+        default=Path("data/phylogeny/unique_taxon_names.nwk"),
         help="Path to Newick tree (.nwk).",
-    )
-    parser.add_argument(
-        "--data",
-        type=Path,
-        default=Path("data/merged_bmr_mass_temperature.csv"),
-        help="Path to CSV with Species column.",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("data/phylogenetic_embeddings.csv"),
+        default=Path("data/phylogeny/phylogenetic_embeddings.csv"),
         help="Output embeddings CSV path.",
     )
     parser.add_argument(
         "--matched-species-out",
         type=Path,
-        default=Path("data/phylogeny_matched_species.csv"),
+        default=Path("data/phylogeny/phylogeny_matched_species.csv"),
         help="Output CSV path for matched unique species between tree and data.",
+    )
+    parser.add_argument(
+        "--species-txt",
+        type=Path,
+        default=Path("data/phylogeny/unique_taxon_names.txt"),
+        help=(
+            "Species txt file used to constrain tree tips. "
+            "Default: data/phylogeny/unique_taxon_names.txt."
+        ),
     )
     parser.add_argument(
         "--n-components",
         type=int,
-        default=10,
-        help="Number of PCA components (default: 10).",
+        default=5,
+        help="Number of PCA components (default: 5).",
     )
     parser.add_argument(
         "--n-jobs",
@@ -269,40 +281,51 @@ def main() -> None:
 
     # Resolve paths from project root so script works from any cwd.
     tree_path = args.tree if args.tree.is_absolute() else root / args.tree
-    data_path = args.data if args.data.is_absolute() else root / args.data
     out_path = args.out if args.out.is_absolute() else root / args.out
     matched_species_out = (
         args.matched_species_out
         if args.matched_species_out.is_absolute()
         else root / args.matched_species_out
     )
+    species_txt_path = (
+        args.species_txt if args.species_txt.is_absolute() else root / args.species_txt
+    )
 
     if not tree_path.exists():
         raise FileNotFoundError(f"Newick tree file not found: {tree_path}")
-    if not data_path.exists():
-        raise FileNotFoundError(f"Data CSV file not found: {data_path}")
 
     tree = Phylo.read(str(tree_path), "newick")
-    df = pd.read_csv(data_path)
-    if "Species" not in df.columns:
-        raise KeyError("Missing required column: Species")
 
     # Fix tip labels like R code: sub("_", " ", tip.label)
     for tip in tree.get_terminals():
         if tip.name:
             tip.name = normalize_tip_like_r_sub(tip.name)
 
-    # Build unique-species match table (tree <-> CSV) after name normalization.
-    match_df = build_species_match_table(tree, df["Species"])
+    # Enforce nwk as subset of corresponding txt species list (remove nwk tips not in txt).
+    allowed_species = load_species_txt(species_txt_path)
+    before_tips, after_tips = prune_tree_to_species_set(tree, allowed_species)
+    removed_not_in_txt = before_tips - after_tips
+    if after_tips < 2:
+        raise ValueError(
+            f"Need at least 2 species after filtering tree by txt list, got {after_tips}."
+        )
+
+    print(f"Species txt used: {species_txt_path}")
+    print(f"number of species before matching: {before_tips}")
+    print(f"number of species removed (in nwk, not in txt): {removed_not_in_txt}")
+    print(f"number of species after matching: {after_tips}")
+
+    # Build match table (single taxon_name column).
+    match_df = build_species_match_table(tree, allowed_species)
     if match_df.empty:
-        raise ValueError("No matched species found between tree and CSV after normalization.")
+        raise ValueError("No matched species found between tree and txt after normalization.")
     matched_species_out.parent.mkdir(parents=True, exist_ok=True)
     match_df.to_csv(matched_species_out, index=False, encoding="utf-8")
 
-    # Compute only on matched unique species from the match table.
-    species_order = match_df["species_normalized"].tolist()
+    # Compute only on species kept in filtered tree order.
+    species_order = get_tree_species_order(tree)
     if len(species_order) < 2:
-        raise ValueError(f"Need at least 2 matched species, got {len(species_order)}.")
+        raise ValueError(f"Need at least 2 filtered tree species, got {len(species_order)}.")
 
     # Dist matrix and reorder to dataframe species order.
     dist_matrix = build_patristic_distance_matrix(
@@ -314,14 +337,11 @@ def main() -> None:
     pca = PCA(n_components=n_components, svd_solver="full")
     embedding_values = pca.fit_transform(dist_matrix.to_numpy())
 
-    embeddings = pd.DataFrame(
-        embedding_values,
-        index=species_order,
-        columns=[f"PC{i+1}" for i in range(n_components)],
-    )
+    embeddings = pd.DataFrame(embedding_values, columns=[f"PC{i+1}" for i in range(n_components)])
+    embeddings.insert(0, "taxon_name", species_order)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    embeddings.to_csv(out_path, index=True, encoding="utf-8")
+    embeddings.to_csv(out_path, index=False, encoding="utf-8")
 
     print("Phylogenetic embeddings created:")
     print(f"  Dimensions: {embeddings.shape[0]} x {embeddings.shape[1]}")
@@ -332,7 +352,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     print(f"Project root: {find_root()}")
-    print(f"Tree path: {Path('data/unique_species.nwk')}")
     print(f"phylogeny.py started")
     main()
     print(f"phylogeny.py finished")
