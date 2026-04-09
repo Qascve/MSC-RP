@@ -76,7 +76,7 @@ def main() -> None:
         description="Compute class distribution for one or more CSV files."
     )
     parser.add_argument(
-        "--inputs",
+        "--input",
         nargs="+",
         type=Path,
         default=[Path("data/cleaning/standard_data.csv")],
@@ -97,7 +97,7 @@ def main() -> None:
     args = parser.parse_args()
 
     csv_paths: list[Path] = []
-    for p in args.inputs:
+    for p in args.input:
         rp = p if p.is_absolute() else root / p
         if not rp.exists():
             raise FileNotFoundError(f"CSV not found: {rp}")

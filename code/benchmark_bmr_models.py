@@ -123,53 +123,58 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     }
 
 
-def save_learning_curve(
+def save_loss_curve(
     train_df: pd.DataFrame, test_df: pd.DataFrame, out_dir: Path, random_state: int
 ) -> pd.DataFrame:
-    rng = np.random.default_rng(random_state)
-    fracs = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
-    repeats = 5
-    rows: list[dict[str, float | str]] = []
+    y_train = train_df[TARGET].to_numpy()
+    y_test = test_df[TARGET].to_numpy()
+    alpha = fit_alpha_three_quarter(train_df["wet_Mass_kg"].to_numpy(), y_train)
+    X_train_res, train_log_base = residual_feature_frame(train_df, alpha)
+    X_test_res, test_log_base = residual_feature_frame(test_df, alpha)
+    residual_train = np.log(y_train) - train_log_base
+    residual_test = np.log(y_test) - test_log_base
 
-    for frac in fracs:
-        n_sub = max(50, int(round(len(train_df) * frac)))
-        n_sub = min(n_sub, len(train_df))
-        for rep in range(repeats):
-            idx = rng.choice(train_df.index.to_numpy(), size=n_sub, replace=False)
-            sub_train = train_df.loc[idx].reset_index(drop=True)
-            preds, _, _, _ = train_and_predict(sub_train, test_df, random_state + rep)
-            y_true = test_df[TARGET].to_numpy()
-            for model in MODEL_NAMES:
-                m = evaluate(y_true, preds[model])
-                rows.append(
-                    {
-                        "model": model,
-                        "train_fraction": float(frac),
-                        "repeat": rep,
-                        "rmse": m["rmse"],
-                    }
-                )
+    xgb_curve = XGBRegressor(
+        objective="reg:squarederror",
+        n_estimators=600,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        reg_lambda=1.0,
+        random_state=random_state,
+        n_jobs=-1,
+        eval_metric="rmse",
+    )
+    xgb_curve.fit(
+        X_train_res,
+        residual_train,
+        eval_set=[(X_train_res, residual_train), (X_test_res, residual_test)],
+        verbose=False,
+    )
 
-    lc_df = pd.DataFrame(rows)
-    lc_df.to_csv(out_dir / "learning_curve_data.csv", index=False, encoding="utf-8")
+    evals = xgb_curve.evals_result()
+    train_rmse = np.asarray(evals["validation_0"]["rmse"], dtype=float)
+    test_rmse = np.asarray(evals["validation_1"]["rmse"], dtype=float)
+    lc_df = pd.DataFrame(
+        {
+            "iteration": np.arange(1, len(train_rmse) + 1, dtype=int),
+            "train_rmse": train_rmse,
+            "test_rmse": test_rmse,
+        }
+    )
+    lc_df.to_csv(out_dir / "loss_curve_data.csv", index=False, encoding="utf-8")
 
     sns.set_theme(style="whitegrid")
     plt.figure(figsize=(9, 6))
-    for model in MODEL_NAMES:
-        sub = lc_df[lc_df["model"] == model]
-        mean_rmse = sub.groupby("train_fraction")["rmse"].mean()
-        std_rmse = sub.groupby("train_fraction")["rmse"].std().fillna(0.0)
-        x = mean_rmse.index.to_numpy()
-        y = mean_rmse.to_numpy()
-        e = std_rmse.to_numpy()
-        plt.plot(x, y, marker="o", label=model)
-        plt.fill_between(x, y - e, y + e, alpha=0.15)
-    plt.xlabel("Train Fraction")
-    plt.ylabel("RMSE on Fixed Test Set")
-    plt.title("Learning Curve")
+    plt.plot(lc_df["iteration"], lc_df["train_rmse"], label="xgboost_train_rmse", linewidth=2)
+    plt.plot(lc_df["iteration"], lc_df["test_rmse"], label="xgboost_test_rmse", linewidth=2)
+    plt.xlabel("Boosting Iteration")
+    plt.ylabel("RMSE (Residual Space)")
+    plt.title("XGBoost Loss Curve")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(out_dir / "learning_curve.png", dpi=160)
+    plt.savefig(out_dir / "loss_curve.png", dpi=160)
     plt.close()
     return lc_df
 
@@ -177,21 +182,36 @@ def save_learning_curve(
 def save_pred_and_residual_plots(out_dir: Path, pred_df: pd.DataFrame) -> None:
     sns.set_theme(style="whitegrid")
 
-    plt.figure(figsize=(8, 7))
     for model in MODEL_NAMES:
-        plt.scatter(pred_df["y_true"], pred_df[model], s=14, alpha=0.5, label=model)
-    min_v = float(min(pred_df["y_true"].min(), *(pred_df[m].min() for m in MODEL_NAMES)))
-    max_v = float(max(pred_df["y_true"].max(), *(pred_df[m].max() for m in MODEL_NAMES)))
-    plt.plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1)
-    plt.xscale("log")
-    plt.yscale("log")
-    plt.xlabel("Observed BMR (W)")
-    plt.ylabel("Predicted BMR (W)")
-    plt.title("Observed vs Predicted")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_dir / "observed_vs_predicted_scatter.png", dpi=160)
-    plt.close()
+        plt.figure(figsize=(8, 7))
+        plt.scatter(
+            pred_df["y_true"],
+            pred_df[model],
+            s=14,
+            alpha=0.55,
+            color="#1f77b4",
+            label=f"{model} prediction",
+        )
+        plt.scatter(
+            pred_df["y_true"],
+            pred_df["y_true"],
+            s=12,
+            alpha=0.35,
+            color="#ff7f0e",
+            label="observed",
+        )
+        min_v = float(min(pred_df["y_true"].min(), pred_df[model].min()))
+        max_v = float(max(pred_df["y_true"].max(), pred_df[model].max()))
+        plt.plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1)
+        plt.xscale("log")
+        plt.yscale("log")
+        plt.xlabel("Observed BMR (W)")
+        plt.ylabel("Predicted BMR (W)")
+        plt.title(f"Observed vs Predicted ({model})")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_dir / f"observed_vs_predicted_scatter_{model}.png", dpi=160)
+        plt.close()
 
     plt.figure(figsize=(8, 7))
     for model in MODEL_NAMES:
@@ -262,13 +282,6 @@ def save_shap_outputs(
     shap_df.to_csv(out_dir / "shap_feature_importance.csv", index=False, encoding="utf-8")
 
     plt.figure(figsize=(9, 6))
-    shap.summary_plot(shap_values, X_test_res, plot_type="bar", show=False)
-    plt.title(f"SHAP Mean |Contribution| ({best})")
-    plt.tight_layout()
-    plt.savefig(out_dir / "shap_summary_bar.png", dpi=160)
-    plt.close()
-
-    plt.figure(figsize=(9, 6))
     shap.summary_plot(shap_values, X_test_res, show=False)
     plt.tight_layout()
     plt.savefig(out_dir / "shap_summary_beeswarm.png", dpi=160)
@@ -331,7 +344,7 @@ def main() -> None:
         pred_df[model] = preds[model]
     pred_df.to_csv(out_dir / "benchmark_predictions_test.csv", index=False, encoding="utf-8")
 
-    save_learning_curve(
+    save_loss_curve(
         train_df=train_df,
         test_df=test_df,
         out_dir=out_dir,
