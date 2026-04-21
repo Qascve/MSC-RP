@@ -13,11 +13,24 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
-FEATURES = ["wet_Mass_kg", "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
 TARGET = "BMR"
-MODEL_NAMES = ["power_law_3_4", "random_forest_residual", "xgboost_residual"]
+MODEL_NAMES = ["power_law_3_4", "random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["wet_Mass_kg"]
-TREE_MODEL_FEATURES = ["wet_Mass_kg", "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
+DEFAULT_SPLITS = ["A", "B", "C"]
+TREE_MODEL_FEATURES = [
+    "class",
+    "order",
+    "family",
+    "Genus",
+    "species",
+    "wet_Mass_kg",
+    "temperature",
+    "pc1",
+    "pc2",
+    "pc3",
+    "pc4",
+    "pc5",
+]
 
 
 def find_root(marker: str = ".gitignore") -> Path:
@@ -31,15 +44,23 @@ def find_root(marker: str = ".gitignore") -> Path:
 
 def load_split_data(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    required = ["taxon_name", *FEATURES, TARGET]
+    required = ["taxon_name", *TREE_MODEL_FEATURES, TARGET]
+    required = list(dict.fromkeys(required))
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
 
     out = df[required].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
-    for col in FEATURES + [TARGET]:
+    categorical_features = ["class", "order", "family", "Genus", "species"]
+    numeric_features = ["wet_Mass_kg", "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
+    for col in categorical_features:
+        out[col] = out[col].astype("string").str.strip()
+    for col in numeric_features + [TARGET]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    out["taxon_name"] = out["taxon_name"].replace("", pd.NA)
+    for col in categorical_features:
+        out[col] = out[col].replace("", pd.NA)
     out = out.dropna(subset=required).copy()
     out = out[(out["wet_Mass_kg"] > 0) & (out[TARGET] > 0)].copy()
     out = out[out["taxon_name"] != ""].copy()
@@ -52,31 +73,54 @@ def fit_alpha_three_quarter(mass_kg: np.ndarray, bmr_w: np.ndarray) -> float:
     return float(np.mean(log_y - 0.75 * log_m))
 
 
-def residual_feature_frame(base_df: pd.DataFrame, alpha: float) -> tuple[pd.DataFrame, np.ndarray]:
+def build_residual_feature_frames(
+    train_df: pd.DataFrame, test_df: pd.DataFrame, alpha: float, model_features: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     mass_col = POWER_LAW_FEATURES[0]
-    mass = base_df[mass_col].to_numpy()
-    base_log_pred = alpha + 0.75 * np.log(mass)
-    feature_data: dict[str, np.ndarray] = {"log_mass": np.log(mass)}
-    for col in TREE_MODEL_FEATURES:
-        if col == mass_col:
-            continue
-        feature_data[col] = base_df[col].to_numpy()
-    feature_data["base_log_pred"] = base_log_pred
-    X_res = pd.DataFrame(feature_data, index=base_df.index)
-    return X_res, base_log_pred
+    train_mass = train_df[mass_col].to_numpy()
+    test_mass = test_df[mass_col].to_numpy()
+    train_log_base = alpha + 0.75 * np.log(train_mass)
+    test_log_base = alpha + 0.75 * np.log(test_mass)
+
+    categorical_features = ["class", "order", "family", "Genus", "species"]
+    tree_categorical_features = [col for col in model_features if col in categorical_features]
+    train_raw = train_df[model_features].reset_index(drop=True).copy()
+    test_raw = test_df[model_features].reset_index(drop=True).copy()
+    merged_raw = pd.concat([train_raw, test_raw], axis=0, ignore_index=True)
+    merged_encoded = pd.get_dummies(
+        merged_raw,
+        columns=tree_categorical_features,
+        prefix=tree_categorical_features,
+        dtype=float,
+    )
+
+    split_idx = len(train_raw)
+    X_train_res = merged_encoded.iloc[:split_idx].copy()
+    X_test_res = merged_encoded.iloc[split_idx:].copy()
+    X_train_res["log_mass"] = np.log(train_mass)
+    X_test_res["log_mass"] = np.log(test_mass)
+    X_train_res["base_log_pred"] = train_log_base
+    X_test_res["base_log_pred"] = test_log_base
+    return X_train_res, X_test_res, train_log_base, test_log_base
 
 
 def train_and_predict(
     train_df: pd.DataFrame, test_df: pd.DataFrame, random_state: int
-) -> tuple[dict[str, np.ndarray], dict[str, object], pd.DataFrame, pd.DataFrame]:
+) -> tuple[dict[str, np.ndarray], dict[str, object], dict[str, pd.DataFrame]]:
     y_train = train_df[TARGET].to_numpy()
     alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), y_train)
+    residual_train = np.log(y_train) - (
+        alpha + 0.75 * np.log(train_df[POWER_LAW_FEATURES[0]].to_numpy())
+    )
 
-    X_train_res, train_log_base = residual_feature_frame(train_df, alpha)
-    X_test_res, test_log_base = residual_feature_frame(test_df, alpha)
-    residual_train = np.log(y_train) - train_log_base
+    X_train_rf, X_test_rf, _rf_train_base, rf_test_base = build_residual_feature_frames(
+        train_df, test_df, alpha, TREE_MODEL_FEATURES
+    )
+    X_train_xgb, X_test_xgb, _xgb_train_base, xgb_test_base = build_residual_feature_frames(
+        train_df, test_df, alpha, TREE_MODEL_FEATURES
+    )
 
-    yhat_base = np.exp(test_log_base)
+    yhat_base = np.exp(rf_test_base)
 
     rf = RandomForestRegressor(
         n_estimators=500,
@@ -85,8 +129,8 @@ def train_and_predict(
         random_state=random_state,
         n_jobs=-1,
     )
-    rf.fit(X_train_res, residual_train)
-    yhat_rf = np.exp(test_log_base + rf.predict(X_test_res))
+    rf.fit(X_train_rf, residual_train)
+    yhat_rf = np.exp(rf_test_base + rf.predict(X_test_rf))
 
     xgb = XGBRegressor(
         objective="reg:squarederror",
@@ -99,16 +143,17 @@ def train_and_predict(
         random_state=random_state,
         n_jobs=-1,
     )
-    xgb.fit(X_train_res, residual_train)
-    yhat_xgb = np.exp(test_log_base + xgb.predict(X_test_res))
+    xgb.fit(X_train_xgb, residual_train)
+    yhat_xgb = np.exp(xgb_test_base + xgb.predict(X_test_xgb))
 
     preds = {
         "power_law_3_4": yhat_base,
-        "random_forest_residual": yhat_rf,
-        "xgboost_residual": yhat_xgb,
+        "random_forest": yhat_rf,
+        "xgboost": yhat_xgb,
     }
-    models = {"random_forest_residual": rf, "xgboost_residual": xgb}
-    return preds, models, X_train_res, X_test_res
+    models = {"random_forest": rf, "xgboost": xgb}
+    shap_inputs = {"random_forest": X_test_rf, "xgboost": X_test_xgb}
+    return preds, models, shap_inputs
 
 
 def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -124,9 +169,10 @@ def save_loss_curve(
 ) -> pd.DataFrame:
     y_train = train_df[TARGET].to_numpy()
     y_test = test_df[TARGET].to_numpy()
-    alpha = fit_alpha_three_quarter(train_df["wet_Mass_kg"].to_numpy(), y_train)
-    X_train_res, train_log_base = residual_feature_frame(train_df, alpha)
-    X_test_res, test_log_base = residual_feature_frame(test_df, alpha)
+    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), y_train)
+    X_train_res, X_test_res, train_log_base, test_log_base = build_residual_feature_frames(
+        train_df, test_df, alpha, TREE_MODEL_FEATURES
+    )
     residual_train = np.log(y_train) - train_log_base
     residual_test = np.log(y_test) - test_log_base
 
@@ -256,15 +302,16 @@ def save_shap_outputs(
     out_dir: Path,
     metrics_df: pd.DataFrame,
     models: dict[str, object],
-    X_test_res: pd.DataFrame,
+    shap_inputs: dict[str, pd.DataFrame],
 ) -> None:
-    shap_candidates = ["random_forest_residual", "xgboost_residual"]
+    shap_candidates = ["random_forest", "xgboost"]
     best = (
         metrics_df[metrics_df["model"].isin(shap_candidates)]
         .sort_values("rmse", ascending=True)
         .iloc[0]["model"]
     )
     model = models[best]
+    X_test_res = shap_inputs[best]
 
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_test_res)
@@ -283,48 +330,28 @@ def save_shap_outputs(
     plt.savefig(out_dir / "shap_summary_beeswarm.png", dpi=160)
     plt.close()
 
+    plt.figure(figsize=(9, 6))
+    shap.summary_plot(shap_values, X_test_res, plot_type="bar", show=False)
+    plt.tight_layout()
+    plt.savefig(out_dir / "shap_summary_bar.png", dpi=160)
+    plt.close()
 
-def main() -> None:
-    root = find_root()
-    parser = argparse.ArgumentParser(
-        description=(
-            "Benchmark BMR models on fixed train/test splits with residual learning "
-            "and output required diagnostic figures."
-        )
-    )
-    parser.add_argument(
-        "--train",
-        type=Path,
-        default=Path("data/train/train.csv"),
-        help="Train CSV path.",
-    )
-    parser.add_argument(
-        "--test",
-        type=Path,
-        default=Path("data/test/test.csv"),
-        help="Test CSV path.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("results/benchmark"),
-        help="Output directory.",
-    )
-    parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
-    args = parser.parse_args()
 
-    train_path = args.train if args.train.is_absolute() else root / args.train
-    test_path = args.test if args.test.is_absolute() else root / args.test
-    out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
+def run_single_split(
+    split_name: str,
+    train_path: Path,
+    test_path: Path,
+    out_dir: Path,
+    random_state: int,
+) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
-
     train_df = load_split_data(train_path)
     test_df = load_split_data(test_path)
 
-    preds, models, _X_train_res, X_test_res = train_and_predict(
+    preds, models, shap_inputs = train_and_predict(
         train_df=train_df,
         test_df=test_df,
-        random_state=args.random_state,
+        random_state=random_state,
     )
     y_test = test_df[TARGET].to_numpy()
 
@@ -334,7 +361,7 @@ def main() -> None:
     metrics_df = pd.DataFrame(metrics_rows).sort_values("rmse")
     metrics_df.to_csv(out_dir / "benchmark_metrics.csv", index=False, encoding="utf-8")
 
-    pred_df = test_df[["taxon_name", *FEATURES]].copy()
+    pred_df = test_df[["taxon_name", *TREE_MODEL_FEATURES]].copy()
     pred_df["y_true"] = y_test
     for model in MODEL_NAMES:
         pred_df[model] = preds[model]
@@ -344,29 +371,102 @@ def main() -> None:
         train_df=train_df,
         test_df=test_df,
         out_dir=out_dir,
-        random_state=args.random_state,
+        random_state=random_state,
     )
     save_pred_and_residual_plots(out_dir=out_dir, pred_df=pred_df)
     save_performance_boxplot(
         out_dir=out_dir,
         y_true=y_test,
         pred_df=pred_df,
-        random_state=args.random_state,
+        random_state=random_state,
     )
     save_shap_outputs(
         out_dir=out_dir,
         metrics_df=metrics_df,
         models=models,
-        X_test_res=X_test_res,
+        shap_inputs=shap_inputs,
     )
 
-    print(f"Train rows used: {len(train_df)}")
-    print(f"Test rows used: {len(test_df)}")
-    print(f"Power-law features: {POWER_LAW_FEATURES}")
-    print(f"Tree-model features: {TREE_MODEL_FEATURES}")
-    print(f"Saved outputs in: {out_dir}")
-    print("\nBenchmark results:")
+    print(f"\n[{split_name}] Train rows used: {len(train_df)}")
+    print(f"[{split_name}] Test rows used: {len(test_df)}")
+    print(f"[{split_name}] Power-law features: {POWER_LAW_FEATURES}")
+    print(f"[{split_name}] Tree-model features: {TREE_MODEL_FEATURES}")
+    print(f"[{split_name}] Saved outputs in: {out_dir}")
+    print(f"\n[{split_name}] Benchmark results:")
     print(metrics_df.to_string(index=False))
+    return metrics_df
+
+
+def main() -> None:
+    print("Running benchmark_bmr_models.py")
+    root = find_root()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Benchmark BMR models on class-holdout splits (A/B/C) with residual learning "
+            "and output required diagnostic figures."
+        )
+    )
+    parser.add_argument(
+        "--splits-root",
+        type=Path,
+        default=Path("data/splits/class_holdout"),
+        help="Root directory containing split subfolders (A/B/C).",
+    )
+    parser.add_argument(
+        "--splits",
+        type=str,
+        default="A,B,C",
+        help="Comma-separated split names to run (default: A,B,C).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("results/benchmark"),
+        help="Output directory. Results are stored under split subfolders.",
+    )
+    parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
+    args = parser.parse_args()
+
+    splits_root = args.splits_root if args.splits_root.is_absolute() else root / args.splits_root
+    out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    split_names = [s.strip() for s in args.splits.split(",") if s.strip()]
+    if not split_names:
+        split_names = DEFAULT_SPLITS.copy()
+
+    summary_rows: list[dict[str, float | str]] = []
+    for split_name in split_names:
+        train_path = splits_root / split_name / "train.csv"
+        test_path = splits_root / split_name / "test.csv"
+        if not train_path.exists() or not test_path.exists():
+            raise FileNotFoundError(
+                f"Split {split_name} files not found: train={train_path}, test={test_path}"
+            )
+
+        split_out_dir = out_dir / split_name
+        metrics_df = run_single_split(
+            split_name=split_name,
+            train_path=train_path,
+            test_path=test_path,
+            out_dir=split_out_dir,
+            random_state=args.random_state,
+        )
+        best_row = metrics_df.sort_values("rmse").iloc[0]
+        summary_rows.append(
+            {
+                "split": split_name,
+                "best_model": str(best_row["model"]),
+                "best_rmse": float(best_row["rmse"]),
+                "best_mae": float(best_row["mae"]),
+                "best_r2": float(best_row["r2"]),
+            }
+        )
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_path = out_dir / "benchmark_summary_all_splits.csv"
+    summary_df.to_csv(summary_path, index=False, encoding="utf-8")
+    print(f"\nSaved all-split summary: {summary_path}")
 
 
 if __name__ == "__main__":
