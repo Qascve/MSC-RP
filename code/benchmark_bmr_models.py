@@ -16,6 +16,8 @@ from xgboost import XGBRegressor
 FEATURES = ["wet_Mass_kg", "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
 TARGET = "BMR"
 MODEL_NAMES = ["power_law_3_4", "random_forest_residual", "xgboost_residual"]
+POWER_LAW_FEATURES = ["wet_Mass_kg"]
+TREE_MODEL_FEATURES = ["wet_Mass_kg", "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
 
 
 def find_root(marker: str = ".gitignore") -> Path:
@@ -51,21 +53,16 @@ def fit_alpha_three_quarter(mass_kg: np.ndarray, bmr_w: np.ndarray) -> float:
 
 
 def residual_feature_frame(base_df: pd.DataFrame, alpha: float) -> tuple[pd.DataFrame, np.ndarray]:
-    mass = base_df["wet_Mass_kg"].to_numpy()
+    mass_col = POWER_LAW_FEATURES[0]
+    mass = base_df[mass_col].to_numpy()
     base_log_pred = alpha + 0.75 * np.log(mass)
-    X_res = pd.DataFrame(
-        {
-            "log_mass": np.log(mass),
-            "temperature": base_df["temperature"].to_numpy(),
-            "pc1": base_df["pc1"].to_numpy(),
-            "pc2": base_df["pc2"].to_numpy(),
-            "pc3": base_df["pc3"].to_numpy(),
-            "pc4": base_df["pc4"].to_numpy(),
-            "pc5": base_df["pc5"].to_numpy(),
-            "base_log_pred": base_log_pred,
-        },
-        index=base_df.index,
-    )
+    feature_data: dict[str, np.ndarray] = {"log_mass": np.log(mass)}
+    for col in TREE_MODEL_FEATURES:
+        if col == mass_col:
+            continue
+        feature_data[col] = base_df[col].to_numpy()
+    feature_data["base_log_pred"] = base_log_pred
+    X_res = pd.DataFrame(feature_data, index=base_df.index)
     return X_res, base_log_pred
 
 
@@ -73,8 +70,7 @@ def train_and_predict(
     train_df: pd.DataFrame, test_df: pd.DataFrame, random_state: int
 ) -> tuple[dict[str, np.ndarray], dict[str, object], pd.DataFrame, pd.DataFrame]:
     y_train = train_df[TARGET].to_numpy()
-    y_test = test_df[TARGET].to_numpy()
-    alpha = fit_alpha_three_quarter(train_df["wet_Mass_kg"].to_numpy(), y_train)
+    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), y_train)
 
     X_train_res, train_log_base = residual_feature_frame(train_df, alpha)
     X_test_res, test_log_base = residual_feature_frame(test_df, alpha)
@@ -366,6 +362,8 @@ def main() -> None:
 
     print(f"Train rows used: {len(train_df)}")
     print(f"Test rows used: {len(test_df)}")
+    print(f"Power-law features: {POWER_LAW_FEATURES}")
+    print(f"Tree-model features: {TREE_MODEL_FEATURES}")
     print(f"Saved outputs in: {out_dir}")
     print("\nBenchmark results:")
     print(metrics_df.to_string(index=False))

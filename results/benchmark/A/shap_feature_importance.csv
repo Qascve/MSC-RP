@@ -1,0 +1,9 @@
+feature,mean_abs_shap
+temperature,0.50477886
+pc3,0.34948862
+log_mass,0.25650918
+pc2,0.24886888
+pc5,0.11581917
+pc1,0.06611061
+base_log_pred,0.04865524
+pc4,0.0238731

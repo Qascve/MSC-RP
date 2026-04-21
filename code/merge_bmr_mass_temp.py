@@ -19,22 +19,18 @@ Output columns (fixed order):
 - BMR_unit
 - temperature
 - temperature_unit
-- Food
-- Habitat
-- Torpor
-- Islands
-- Mountains
-- source_file
+- Reference
 """
 
 from __future__ import annotations
-from species_record_stats import compute_species_point_stats
 import argparse
 from pathlib import Path
+import time
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+from pygbif import species as gbif_species
 
 GENUS_COL = "Genus"
 SPECIES_COL = "species"
@@ -125,12 +121,7 @@ def make_output_frame(length: int) -> pd.DataFrame:
         "BMR_unit",
         "temperature",
         "temperature_unit",
-        "Food",
-        "Habitat",
-        "Torpor",
-        "Islands",
-        "Mountains",
-        "source_file",
+        "Reference",
     ]
     return pd.DataFrame({c: [np.nan] * length for c in cols})
 
@@ -292,6 +283,117 @@ def normalize_text_value(value: object) -> str:
     return " ".join(text.split())
 
 
+def gbif_name_backbone_with_retry(
+    scientific_name: str, timeout_seconds: float, retries: int, retry_delay_seconds: float
+) -> dict:
+    last_exc: Exception | None = None
+    for i in range(max(1, retries)):
+        try:
+            data = gbif_species.name_backbone(
+                scientificName=scientific_name,
+                verbose=True,
+                timeout=timeout_seconds,
+            )
+            if isinstance(data, dict):
+                return data
+            return {}
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if i < max(1, retries) - 1:
+                time.sleep(retry_delay_seconds * (i + 1))
+    if last_exc is not None:
+        return {}
+    return {}
+
+
+def extract_rank_from_gbif(data: dict, rank: str) -> str:
+    direct = normalize_text_value(data.get(rank, ""))
+    if direct:
+        return direct
+    classification = data.get("classification", []) if isinstance(data, dict) else []
+    for node in classification:
+        if normalize_text_value(node.get("rank", "")).lower() == rank.lower():
+            value = normalize_text_value(node.get("name", ""))
+            if value:
+                return value
+    return ""
+
+
+def fill_missing_taxonomy_with_gbif(
+    df: pd.DataFrame,
+    timeout_seconds: float = 20.0,
+    retries: int = 3,
+    retry_delay_seconds: float = 0.35,
+    pause_seconds: float = 0.01,
+) -> tuple[pd.DataFrame, dict[str, int], dict[str, int]]:
+    out = df.copy()
+    taxonomy_cols = ["class", "order", "family"]
+
+    for col in taxonomy_cols:
+        out[col] = out[col].astype("string").str.strip().replace({"": pd.NA, "nan": pd.NA, "NaN": pd.NA})
+
+    missing_before = {col: int(out[col].isna().sum()) for col in taxonomy_cols}
+    if all(v == 0 for v in missing_before.values()):
+        return out, missing_before, missing_before
+
+    binomial = (
+        out[GENUS_COL].astype("string").str.strip().fillna("")
+        + " "
+        + out[SPECIES_COL].astype("string").str.strip().fillna("")
+    ).str.strip()
+    binomial = binomial.where(binomial != "", pd.NA)
+    missing_any = out[taxonomy_cols].isna().any(axis=1)
+    target_names = sorted(binomial[missing_any & binomial.notna()].astype(str).unique().tolist())
+
+    if not target_names:
+        return out, missing_before, missing_before
+
+    taxonomy_map: dict[str, dict[str, str]] = {}
+    for idx, name in enumerate(target_names, start=1):
+        gbif_data = gbif_name_backbone_with_retry(
+            scientific_name=name,
+            timeout_seconds=timeout_seconds,
+            retries=retries,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+        taxonomy_map[name] = {
+            "class": extract_rank_from_gbif(gbif_data, "class"),
+            "order": extract_rank_from_gbif(gbif_data, "order"),
+            "family": extract_rank_from_gbif(gbif_data, "family"),
+        }
+        if pause_seconds > 0:
+            time.sleep(pause_seconds)
+        if idx % 200 == 0:
+            print(f"[gbif taxonomy fill] processed: {idx}/{len(target_names)}", flush=True)
+
+    for col in taxonomy_cols:
+        missing_mask = out[col].isna()
+        fill_map = {name: values[col] for name, values in taxonomy_map.items() if values[col] != ""}
+        if fill_map:
+            fill_series = binomial.map(fill_map)
+            fill_mask = missing_mask & fill_series.notna()
+            out.loc[fill_mask, col] = fill_series.loc[fill_mask]
+        out[col] = out[col].astype("string").str.strip().replace({"": pd.NA, "nan": pd.NA, "NaN": pd.NA})
+
+    missing_after = {col: int(out[col].isna().sum()) for col in taxonomy_cols}
+    return out, missing_before, missing_after
+
+
+def extract_reference_series(df: pd.DataFrame) -> pd.Series:
+    def clean_ref(col: str) -> pd.Series:
+        ref = df[col].astype("string").str.strip()
+        return ref.replace({"": pd.NA, "nan": pd.NA, "NaN": pd.NA})
+
+    # Case-insensitive reference lookup:
+    # supports names like "Reference", "XXReference", "Reference xx", etc.
+    for col in df.columns:
+        key = str(col).strip().lower()
+        if "reference" in key:
+            return clean_ref(str(col))
+
+    return pd.Series([pd.NA] * len(df), dtype="string")
+
+
 def extract_genus_species(
     genus_series: Optional[pd.Series],
     species_series: Optional[pd.Series],
@@ -342,13 +444,6 @@ def extract_genus_species(
     return pd.Series(genus_out, dtype="string"), pd.Series(species_out, dtype="string")
 
 
-def build_full_species_series(df: pd.DataFrame) -> pd.Series:
-    genus = df[GENUS_COL].astype("string").str.strip()
-    species = df[SPECIES_COL].astype("string").str.strip()
-    full = (genus.fillna("") + " " + species.fillna("")).str.strip()
-    return full.where((genus.notna() & (genus != "") & species.notna() & (species != "")), pd.NA)
-
-
 def clean_text_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     out = df.copy()
     for col in cols:
@@ -391,11 +486,7 @@ def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
         "BMR_unit",
         "temperature",
         "temperature_unit",
-        "Food",
-        "Habitat",
-        "Torpor",
-        "Islands",
-        "Mountains",
+        "Reference",
     ]
     out = out.drop_duplicates(subset=dedup_cols, keep="first")
     return out
@@ -418,15 +509,14 @@ def parse_41586(path: Path) -> pd.DataFrame:
     out[WET_G_COL] = mass_g
     out[WET_KG_COL] = mass_kg
     out["BMR"] = numeric(df["BMR (W)"]) if "BMR (W)" in df.columns else np.nan
-    out["BMR_unit"] = np.where(pd.to_numeric(out["BMR"], errors="coerce").notna(), "W", np.nan)
+    bmr_mask = pd.to_numeric(out["BMR"], errors="coerce").notna()
+    out["BMR_unit"] = pd.Series("W", index=out.index, dtype="string").where(bmr_mask, pd.NA)
     out["temperature"] = numeric(df["Temperature (C)"]) if "Temperature (C)" in df.columns else np.nan
-    out["temperature_unit"] = np.where(pd.to_numeric(out["temperature"], errors="coerce").notna(), "C", np.nan)
-    out["Food"] = df["Food"] if "Food" in df.columns else np.nan
-    out["Habitat"] = df["Habitat"] if "Habitat" in df.columns else np.nan
-    out["Torpor"] = df["Torpor"] if "Torpor" in df.columns else np.nan
-    out["Islands"] = df["Islands"] if "Islands" in df.columns else np.nan
-    out["Mountains"] = df["Mountains"] if "Mountains" in df.columns else np.nan
-    out["source_file"] = path.name
+    temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
+    out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
+        temp_mask, pd.NA
+    )
+    out["Reference"] = extract_reference_series(df)
     fallback_mask = (
         pd.to_numeric(out[WET_G_COL], errors="coerce").isna()
         & pd.to_numeric(out["BMR"], errors="coerce").notna()
@@ -461,17 +551,15 @@ def parse_pnas(path: Path) -> pd.DataFrame:
 
     bmr_col = "Metabolic Rate (W, at 25C)"
     out["BMR"] = numeric(df[bmr_col]) if bmr_col in df.columns else np.nan
-    out["BMR_unit"] = np.where(pd.to_numeric(out["BMR"], errors="coerce").notna(), "W", np.nan)
+    bmr_mask = pd.to_numeric(out["BMR"], errors="coerce").notna()
+    out["BMR_unit"] = pd.Series("W", index=out.index, dtype="string").where(bmr_mask, pd.NA)
 
     out["temperature"] = numeric(df["T (C)"]) if "T (C)" in df.columns else np.nan
-    out["temperature_unit"] = np.where(pd.to_numeric(out["temperature"], errors="coerce").notna(), "C", np.nan)
-
-    out["Food"] = np.nan
-    out["Habitat"] = np.nan
-    out["Torpor"] = np.nan
-    out["Islands"] = np.nan
-    out["Mountains"] = np.nan
-    out["source_file"] = path.name
+    temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
+    out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
+        temp_mask, pd.NA
+    )
+    out["Reference"] = extract_reference_series(df)
     fallback_mask = (
         pd.to_numeric(out[WET_G_COL], errors="coerce").isna()
         & pd.to_numeric(out["BMR"], errors="coerce").notna()
@@ -508,19 +596,17 @@ def parse_observations(path: Path) -> pd.DataFrame:
     )
     mr_unit = df["metabolic rate - units"] if "metabolic rate - units" in df.columns else pd.Series([np.nan] * len(df))
     out["BMR"] = mr
-    out["BMR_unit"] = np.where(pd.to_numeric(out["BMR"], errors="coerce").notna(), mr_unit, np.nan)
+    bmr_mask = pd.to_numeric(out["BMR"], errors="coerce").notna()
+    out["BMR_unit"] = mr_unit.astype("string").where(bmr_mask, pd.NA)
 
     out["temperature"] = (
         numeric(df["original temperature"]) if "original temperature" in df.columns else np.nan
     )
-    out["temperature_unit"] = np.where(pd.to_numeric(out["temperature"], errors="coerce").notna(), "C", np.nan)
-
-    out["Food"] = np.nan
-    out["Habitat"] = np.nan
-    out["Torpor"] = np.nan
-    out["Islands"] = np.nan
-    out["Mountains"] = np.nan
-    out["source_file"] = path.name
+    temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
+    out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
+        temp_mask, pd.NA
+    )
+    out["Reference"] = extract_reference_series(df)
 
     # If mass unit is missing/unknown but mass+BMR exist, default to wet mass in grams.
     fallback_mask = (
@@ -535,6 +621,7 @@ def parse_observations(path: Path) -> pd.DataFrame:
 
 
 def main() -> None:
+    print("Merge start")
     parser = argparse.ArgumentParser(description="Merge BMR/mass/temperature datasets into one CSV.")
     parser.add_argument(
         "--base-dir",
@@ -547,6 +634,30 @@ def main() -> None:
         type=Path,
         default=None,
         help="Output CSV path (default: <base-dir>/data/cleaning/merged_bmr_mass_temperature.csv).",
+    )
+    parser.add_argument(
+        "--gbif-timeout-seconds",
+        type=float,
+        default=20.0,
+        help="GBIF API timeout in seconds for taxonomy fill.",
+    )
+    parser.add_argument(
+        "--gbif-retries",
+        type=int,
+        default=3,
+        help="GBIF query retries for taxonomy fill.",
+    )
+    parser.add_argument(
+        "--gbif-retry-delay-seconds",
+        type=float,
+        default=0.35,
+        help="Base retry delay for GBIF taxonomy fill.",
+    )
+    parser.add_argument(
+        "--gbif-pause-seconds",
+        type=float,
+        default=0.01,
+        help="Pause between GBIF queries for taxonomy fill.",
     )
     args = parser.parse_args()
 
@@ -579,17 +690,32 @@ def main() -> None:
             "family",
             "BMR_unit",
             "temperature_unit",
-            "Food",
-            "Habitat",
-            "Torpor",
-            "Islands",
-            "Mountains",
-            "source_file",
+            "Reference",
         ],
     )
 
     # Always keep only usable core rows and remove duplicate records.
     merged = drop_incomplete_core_and_deduplicate(merged)
+
+    merged, missing_before, missing_after = fill_missing_taxonomy_with_gbif(
+        merged,
+        timeout_seconds=args.gbif_timeout_seconds,
+        retries=args.gbif_retries,
+        retry_delay_seconds=args.gbif_retry_delay_seconds,
+        pause_seconds=args.gbif_pause_seconds,
+    )
+    print(
+        "Taxonomy missing before fill: "
+        f"class={missing_before['class']}, "
+        f"order={missing_before['order']}, "
+        f"family={missing_before['family']}"
+    )
+    print(
+        "Taxonomy missing after fill: "
+        f"class={missing_after['class']}, "
+        f"order={missing_after['order']}, "
+        f"family={missing_after['family']}"
+    )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(output_path, index=False, encoding="utf-8")
@@ -603,15 +729,7 @@ def main() -> None:
     print("Non-null counts:")
     for c in [GENUS_COL, SPECIES_COL, WET_G_COL, WET_KG_COL, "BMR", "temperature"]:
         print(f"  {c}: {int(merged[c].notna().sum())}")
-
-    stats_df = merged.copy()
-    stats_df["__species_binomial"] = build_full_species_series(stats_df)
-    stats = compute_species_point_stats(stats_df, species_col="__species_binomial")
-    print(f"Species proportion (=1 data point): {stats['ratio_eq_1']:.4f}; rows: {stats['rows_eq_1']}")
-    print(f"Species proportion (=2 data points): {stats['ratio_eq_2']:.4f}; rows: {stats['rows_eq_2']}")
-    print(f"Species proportion (>=3 data points): {stats['ratio_ge_3']:.4f}; rows: {stats['rows_ge_3']}")
-    
-
+    print(f"Unique species: {len(merged[SPECIES_COL].unique())}")
 
 
 if __name__ == "__main__":

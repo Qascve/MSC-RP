@@ -175,9 +175,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Filter taxa in three steps: "
-            "(1) remove taxa with <2 records, "
+            "(1) remove excluded classes, "
             "(2) standardize names via pytaxon, "
-            "(3) remove excluded classes (tree/fungi/bacteria/algae lists)."
+            "(3) remove excluded classes again using GBIF class lookup."
         )
     )
     parser.add_argument(
@@ -247,13 +247,6 @@ def main() -> None:
     df = df[df["Genus"].notna() & (df["Genus"] != "") & df["species"].notna() & (df["species"] != "")]
     df = df.copy()
     raw_taxon_name = (df["Genus"] + " " + df["species"]).str.strip()
-
-    # Step 1: remove taxa with record count < 2
-    counts = raw_taxon_name.value_counts()
-    keep_mask = raw_taxon_name.map(counts).fillna(0).astype(int) >= 2
-    df = df.loc[keep_mask].copy()
-    raw_taxon_name = raw_taxon_name.loc[keep_mask]
-    print(f"Rows after count filter (>=2): {len(df)}", flush=True)
 
     unique_names = sorted(raw_taxon_name.unique().tolist())
     print(f"Unique taxa to standardize: {len(unique_names)}", flush=True)
