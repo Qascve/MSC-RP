@@ -16,7 +16,12 @@ from xgboost import XGBRegressor
 TARGET = "BMR"
 MODEL_NAMES = ["power_law_3_4", "random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["wet_Mass_kg"]
-DEFAULT_SPLITS = ["A", "B", "C"]
+GROUP_CLASS_FILTERS: dict[str, str | None] = {
+    "all": None,
+    "a": "Teleostei",
+    "b": "Mammalia",
+    "c": "Insecta",
+}
 TREE_MODEL_FEATURES = [
     "class",
     "order",
@@ -168,13 +173,11 @@ def save_loss_curve(
     train_df: pd.DataFrame, test_df: pd.DataFrame, out_dir: Path, random_state: int
 ) -> pd.DataFrame:
     y_train = train_df[TARGET].to_numpy()
-    y_test = test_df[TARGET].to_numpy()
     alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), y_train)
-    X_train_res, X_test_res, train_log_base, test_log_base = build_residual_feature_frames(
+    X_train_res, _X_test_res, train_log_base, _test_log_base = build_residual_feature_frames(
         train_df, test_df, alpha, TREE_MODEL_FEATURES
     )
     residual_train = np.log(y_train) - train_log_base
-    residual_test = np.log(y_test) - test_log_base
 
     xgb_curve = XGBRegressor(
         objective="reg:squarederror",
@@ -191,18 +194,16 @@ def save_loss_curve(
     xgb_curve.fit(
         X_train_res,
         residual_train,
-        eval_set=[(X_train_res, residual_train), (X_test_res, residual_test)],
+        eval_set=[(X_train_res, residual_train)],
         verbose=False,
     )
 
     evals = xgb_curve.evals_result()
     train_rmse = np.asarray(evals["validation_0"]["rmse"], dtype=float)
-    test_rmse = np.asarray(evals["validation_1"]["rmse"], dtype=float)
     lc_df = pd.DataFrame(
         {
             "iteration": np.arange(1, len(train_rmse) + 1, dtype=int),
             "train_rmse": train_rmse,
-            "test_rmse": test_rmse,
         }
     )
     lc_df.to_csv(out_dir / "loss_curve_data.csv", index=False, encoding="utf-8")
@@ -210,10 +211,9 @@ def save_loss_curve(
     sns.set_theme(style="whitegrid")
     plt.figure(figsize=(9, 6))
     plt.plot(lc_df["iteration"], lc_df["train_rmse"], label="xgboost_train_rmse", linewidth=2)
-    plt.plot(lc_df["iteration"], lc_df["test_rmse"], label="xgboost_test_rmse", linewidth=2)
     plt.xlabel("Boosting Iteration")
     plt.ylabel("RMSE (Residual Space)")
-    plt.title("XGBoost Loss Curve")
+    plt.title("XGBoost Training Loss Curve")
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_dir / "loss_curve.png", dpi=160)
@@ -337,16 +337,14 @@ def save_shap_outputs(
     plt.close()
 
 
-def run_single_split(
-    split_name: str,
-    train_path: Path,
-    test_path: Path,
+def run_single_group(
+    group_name: str,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
     out_dir: Path,
     random_state: int,
 ) -> pd.DataFrame:
     out_dir.mkdir(parents=True, exist_ok=True)
-    train_df = load_split_data(train_path)
-    test_df = load_split_data(test_path)
 
     preds, models, shap_inputs = train_and_predict(
         train_df=train_df,
@@ -387,12 +385,12 @@ def run_single_split(
         shap_inputs=shap_inputs,
     )
 
-    print(f"\n[{split_name}] Train rows used: {len(train_df)}")
-    print(f"[{split_name}] Test rows used: {len(test_df)}")
-    print(f"[{split_name}] Power-law features: {POWER_LAW_FEATURES}")
-    print(f"[{split_name}] Tree-model features: {TREE_MODEL_FEATURES}")
-    print(f"[{split_name}] Saved outputs in: {out_dir}")
-    print(f"\n[{split_name}] Benchmark results:")
+    print(f"\n[{group_name}] Train rows used: {len(train_df)}")
+    print(f"[{group_name}] Test rows used: {len(test_df)}")
+    print(f"[{group_name}] Power-law features: {POWER_LAW_FEATURES}")
+    print(f"[{group_name}] Tree-model features: {TREE_MODEL_FEATURES}")
+    print(f"[{group_name}] Saved outputs in: {out_dir}")
+    print(f"\n[{group_name}] Benchmark results:")
     print(metrics_df.to_string(index=False))
     return metrics_df
 
@@ -402,60 +400,62 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark BMR models on class-holdout splits (A/B/C) with residual learning "
-            "and output required diagnostic figures."
+            "Train on stratified train split, evaluate on full test and class subsets "
+            "(a=Teleostei, b=Mammalia, c=Insecta), and save diagnostics."
         )
     )
     parser.add_argument(
-        "--splits-root",
+        "--train",
         type=Path,
-        default=Path("data/splits/class_holdout"),
-        help="Root directory containing split subfolders (A/B/C).",
+        default=Path("data/splits/stratified/train.csv"),
+        help="Train CSV path.",
     )
     parser.add_argument(
-        "--splits",
-        type=str,
-        default="A,B,C",
-        help="Comma-separated split names to run (default: A,B,C).",
+        "--test",
+        type=Path,
+        default=Path("data/splits/stratified/test.csv"),
+        help="Test CSV path (full test set).",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("results/benchmark"),
-        help="Output directory. Results are stored under split subfolders.",
+        help="Output directory. Results are stored under group subfolders (all/a/b/c).",
     )
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     args = parser.parse_args()
 
-    splits_root = args.splits_root if args.splits_root.is_absolute() else root / args.splits_root
+    train_path = args.train if args.train.is_absolute() else root / args.train
+    test_path = args.test if args.test.is_absolute() else root / args.test
     out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    split_names = [s.strip() for s in args.splits.split(",") if s.strip()]
-    if not split_names:
-        split_names = DEFAULT_SPLITS.copy()
+    train_df = load_split_data(train_path)
+    test_df_all = load_split_data(test_path)
 
     summary_rows: list[dict[str, float | str]] = []
-    for split_name in split_names:
-        train_path = splits_root / split_name / "train.csv"
-        test_path = splits_root / split_name / "test.csv"
-        if not train_path.exists() or not test_path.exists():
-            raise FileNotFoundError(
-                f"Split {split_name} files not found: train={train_path}, test={test_path}"
-            )
+    for group_name, class_name in GROUP_CLASS_FILTERS.items():
+        if class_name is None:
+            group_test_df = test_df_all.copy()
+        else:
+            group_test_df = test_df_all[test_df_all["class"] == class_name].copy()
+        if group_test_df.empty:
+            raise ValueError(f"Group {group_name} has no rows for class={class_name}.")
 
-        split_out_dir = out_dir / split_name
-        metrics_df = run_single_split(
-            split_name=split_name,
-            train_path=train_path,
-            test_path=test_path,
-            out_dir=split_out_dir,
+        group_out_dir = out_dir / group_name
+        metrics_df = run_single_group(
+            group_name=group_name,
+            train_df=train_df,
+            test_df=group_test_df,
+            out_dir=group_out_dir,
             random_state=args.random_state,
         )
         best_row = metrics_df.sort_values("rmse").iloc[0]
         summary_rows.append(
             {
-                "split": split_name,
+                "group": group_name,
+                "class_filter": class_name if class_name is not None else "ALL",
+                "test_rows": int(len(group_test_df)),
                 "best_model": str(best_row["model"]),
                 "best_rmse": float(best_row["rmse"]),
                 "best_mae": float(best_row["mae"]),
@@ -464,9 +464,9 @@ def main() -> None:
         )
 
     summary_df = pd.DataFrame(summary_rows)
-    summary_path = out_dir / "benchmark_summary_all_splits.csv"
+    summary_path = out_dir / "benchmark_summary_groups.csv"
     summary_df.to_csv(summary_path, index=False, encoding="utf-8")
-    print(f"\nSaved all-split summary: {summary_path}")
+    print(f"\nSaved group summary: {summary_path}")
 
 
 if __name__ == "__main__":

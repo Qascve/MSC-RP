@@ -4,13 +4,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
-CLASS_HOLDOUT_SPLITS = {
-    "A": "Teleostei",
-    "B": "Mammalia",
-    "C": "Insecta",
-}
 OUTPUT_COLUMNS = [
     "class",
     "order",
@@ -46,8 +42,8 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Generate A/B/C train-test splits by class holdout: "
-            "A=Teleostei, B=Mammalia, C=Insecta."
+            "Generate train-test split "
+            "Each class contributes samples to both train and test when possible."
         )
     )
     parser.add_argument(
@@ -59,13 +55,22 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/splits/class_holdout"),
-        help="Output directory containing A/B/C subfolders.",
+        default=Path("data/splits"),
+        help="Output directory containing train/test CSV files.",
     )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.3,
+        help="Per-class test ratio (default: 0.3).",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     args = parser.parse_args()
 
     input_path = args.input if args.input.is_absolute() else root / args.input
     out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
+    if not 0 < args.test_ratio < 1:
+        raise ValueError("--test-ratio must be in (0, 1).")
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -102,48 +107,77 @@ def main() -> None:
     if out.empty:
         raise ValueError("No valid rows left after filtering required columns.")
 
+    class_counts = out["class"].value_counts(dropna=False)
+    singleton_classes = class_counts[class_counts == 1].index.tolist()
+    if singleton_classes:
+        out = out[~out["class"].isin(singleton_classes)].copy()
+        out = out.reset_index(drop=True)
+        print(
+            "Dropped singleton classes (rows_total=1): "
+            + ", ".join(str(c) for c in sorted(singleton_classes))
+        )
+
+    if out.empty:
+        raise ValueError("No rows left after dropping singleton classes.")
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    split_rows: list[dict[str, str | int | float]] = []
-    for split_name, test_class in CLASS_HOLDOUT_SPLITS.items():
-        test_df = out[out["class"] == test_class].copy()
-        train_df = out[out["class"] != test_class].copy()
+    out = out.reset_index(drop=True)
+    out["row_id"] = np.arange(len(out), dtype=int)
+    rng = np.random.default_rng(args.seed)
 
-        if test_df.empty:
-            raise ValueError(f"Split {split_name} has empty test set for class={test_class}.")
-        if train_df.empty:
-            raise ValueError(f"Split {split_name} has empty train set for class={test_class}.")
-        if set(train_df.index).intersection(set(test_df.index)):
-            raise RuntimeError(f"Split {split_name} leakage detected by overlapping indices.")
-
-        split_dir = out_dir / split_name
-        split_dir.mkdir(parents=True, exist_ok=True)
-        train_path = split_dir / "train.csv"
-        test_path = split_dir / "test.csv"
-        train_df.to_csv(train_path, index=False, encoding="utf-8")
-        test_df.to_csv(test_path, index=False, encoding="utf-8")
-
-        split_rows.append(
+    test_ids: list[int] = []
+    class_rows: list[dict[str, str | int | float]] = []
+    for class_name, group in out.groupby("class", sort=True):
+        group_ids = group["row_id"].to_numpy()
+        n = len(group_ids)
+        n_test = int(round(n * args.test_ratio))
+        if n >= 2:
+            n_test = max(1, min(n - 1, n_test))
+        else:
+            n_test = 0
+        if n_test > 0:
+            picked = rng.choice(group_ids, size=n_test, replace=False)
+            test_ids.extend(picked.tolist())
+        class_rows.append(
             {
-                "split": split_name,
-                "test_class": test_class,
-                "rows_total": len(out),
-                "train_rows": len(train_df),
-                "test_rows": len(test_df),
-                "train_species": int(train_df["taxon_name"].nunique()),
-                "test_species": int(test_df["taxon_name"].nunique()),
+                "class": str(class_name),
+                "rows_total": n,
+                "rows_train": n - n_test,
+                "rows_test": n_test,
+                "test_ratio_actual": (n_test / n) if n > 0 else 0.0,
             }
         )
 
-        print(f"[Split {split_name}] test_class={test_class}")
-        print(f"  Saved train: {train_path}")
-        print(f"  Saved test: {test_path}")
-        print(f"  Train rows: {len(train_df)}")
-        print(f"  Test rows: {len(test_df)}")
+    test_id_set = set(test_ids)
+    test_df = out[out["row_id"].isin(test_id_set)].copy()
+    train_df = out[~out["row_id"].isin(test_id_set)].copy()
 
-    summary_df = pd.DataFrame(split_rows)
-    summary_path = out_dir / "split_summary.csv"
-    summary_df.to_csv(summary_path, index=False, encoding="utf-8")
-    print(f"Saved split summary: {summary_path}")
+    if test_df.empty or train_df.empty:
+        raise RuntimeError("Split failed: empty train or test set.")
+    if set(train_df["row_id"]).intersection(set(test_df["row_id"])):
+        raise RuntimeError("Leakage detected: overlapping row_id between train/test.")
+
+    train_df = train_df.drop(columns=["row_id"])
+    test_df = test_df.drop(columns=["row_id"])
+
+    train_path = out_dir / "train.csv"
+    test_path = out_dir / "test.csv"
+    train_df.to_csv(train_path, index=False, encoding="utf-8")
+    test_df.to_csv(test_path, index=False, encoding="utf-8")
+
+    class_summary = pd.DataFrame(class_rows).sort_values("rows_total", ascending=False)
+    class_summary_path = out_dir / "class_split_summary.csv"
+    class_summary.to_csv(class_summary_path, index=False, encoding="utf-8")
+
+    print(f"Saved train: {train_path}")
+    print(f"Saved test: {test_path}")
+    print(f"Saved class summary: {class_summary_path}")
+    print(f"Rows total: {len(out)}")
+    print(f"Train rows: {len(train_df)}")
+    print(f"Test rows: {len(test_df)}")
+    print(f"Classes total: {out['class'].nunique()}")
+    print(f"Classes in train: {train_df['class'].nunique()}")
+    print(f"Classes in test: {test_df['class'].nunique()}")
 
 
 if __name__ == "__main__":
