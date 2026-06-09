@@ -104,9 +104,42 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     }
 
 
-def run_models(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
+def load_benchmark_predictions(path: Path, test_df: pd.DataFrame) -> dict[str, np.ndarray]:
+    pred_df = pd.read_csv(path)
+    required = ["y_true", "random_forest", "xgboost"]
+    missing = [c for c in required if c not in pred_df.columns]
+    if missing:
+        raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
+
+    for col in required:
+        pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
+    pred_df = pred_df.dropna(subset=required).reset_index(drop=True)
+
+    y_true = test_df[TARGET].to_numpy()
+    if len(pred_df) != len(test_df):
+        raise ValueError(
+            "Benchmark predictions row count mismatches test split. "
+            "Please rerun benchmark on the same train/test files."
+        )
+
+    if not np.allclose(pred_df["y_true"].to_numpy(), y_true, rtol=1e-10, atol=1e-12):
+        raise ValueError(
+            "Benchmark predictions y_true is not aligned with current test split. "
+            "Please rerun benchmark on the same test file."
+        )
+
+    return {
+        "random_forest": pred_df["random_forest"].to_numpy(dtype=float),
+        "xgboost": pred_df["xgboost"].to_numpy(dtype=float),
+    }
+
+
+def run_models(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    benchmark_predictions: dict[str, np.ndarray],
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     y_train_log = train_df["log_BMR"].to_numpy()
-    y_test_log = test_df["log_BMR"].to_numpy()
 
     # m0: log_BMR ~ offset(0.75 * log_mass)
     alpha_m0 = float(np.mean(y_train_log - 0.75 * train_df["log_mass"].to_numpy()))
@@ -154,53 +187,73 @@ def run_models(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
     coef_m3 = fit_ols(X3_train, y_train_log)
     yhat_m3_log = predict_ols(X3_test, coef_m3)
 
+    y_true = test_df[TARGET].to_numpy()
+    predictions: dict[str, np.ndarray] = {
+        "m0_fixed_b_3_4": np.exp(yhat_m0_log),
+        "m1_estimated_b": np.exp(yhat_m1_log),
+        "m2_baseline_mte": np.exp(yhat_m2_log),
+        **benchmark_predictions,
+    }
+
     metric_rows = []
     y_true = test_df[TARGET].to_numpy()
     metric_rows.append(
         {
             "model": "m0_fixed_b_3_4",
-            **evaluate(y_true, np.exp(yhat_m0_log)),
+            **evaluate(y_true, predictions["m0_fixed_b_3_4"]),
         }
     )
     metric_rows.append(
         {
             "model": "m1_estimated_b",
-            **evaluate(y_true, np.exp(yhat_m1_log)),
+            **evaluate(y_true, predictions["m1_estimated_b"]),
         }
     )
     metric_rows.append(
         {
             "model": "m2_baseline_mte",
-            **evaluate(y_true, np.exp(yhat_m2_log)),
+            **evaluate(y_true, predictions["m2_baseline_mte"]),
         }
     )
 
     if len(test_df_m3) > 0:
         y_true_m3 = test_df_m3[TARGET].to_numpy()
         y_pred_m3 = np.exp(yhat_m3_log)
+        y_pred_m3_full = np.full(len(test_df), np.nan, dtype=float)
+        y_pred_m3_full[known_mask.to_numpy()] = y_pred_m3
+        predictions["m3_clade_specific_mte"] = y_pred_m3_full
         metric_rows.append({"model": "m3_clade_specific_mte", **evaluate(y_true_m3, y_pred_m3)})
+
+    metric_rows.append(
+        {
+            "model": "random_forest",
+            **evaluate(y_true, predictions["random_forest"]),
+        }
+    )
+    metric_rows.append(
+        {
+            "model": "xgboost",
+            **evaluate(y_true, predictions["xgboost"]),
+        }
+    )
 
     metrics_df = pd.DataFrame(metric_rows).sort_values("rmse").reset_index(drop=True)
 
-    return metrics_df
+    return metrics_df, predictions, y_true
 
 
 def save_model_performance_plot(metrics_df: pd.DataFrame, out_dir: Path) -> Path:
     plot_df = metrics_df.copy()
     sns.set_theme(style="whitegrid")
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     sns.barplot(data=plot_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
     axes[0].set_title("RMSE")
     axes[0].tick_params(axis="x", rotation=20)
 
-    sns.barplot(data=plot_df, x="model", y="mae", ax=axes[1], color="#55A868")
-    axes[1].set_title("MAE")
+    sns.barplot(data=plot_df, x="model", y="r2", ax=axes[1], color="#C44E52")
+    axes[1].set_title("R2")
     axes[1].tick_params(axis="x", rotation=20)
-
-    sns.barplot(data=plot_df, x="model", y="r2", ax=axes[2], color="#C44E52")
-    axes[2].set_title("R2")
-    axes[2].tick_params(axis="x", rotation=20)
 
     for ax in axes:
         ax.set_xlabel("")
@@ -211,6 +264,31 @@ def save_model_performance_plot(metrics_df: pd.DataFrame, out_dir: Path) -> Path
     output_path = out_dir / "model_performance_comparison.png"
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+    return output_path
+
+
+def save_residual_plot(
+    y_true: np.ndarray,
+    predictions: dict[str, np.ndarray],
+    out_dir: Path,
+) -> Path:
+    sns.set_theme(style="whitegrid")
+    plt.figure(figsize=(8, 7))
+    for model_name, y_pred in predictions.items():
+        mask = ~np.isnan(y_pred)
+        pred_x = y_pred[mask]
+        residual = y_true[mask] - y_pred[mask]
+        plt.scatter(pred_x, residual, s=14, alpha=0.45, label=model_name)
+    plt.axhline(0.0, color="k", linestyle="--", linewidth=1)
+    plt.xscale("log")
+    plt.xlabel("Predicted BMR (W)")
+    plt.ylabel("Residual (Observed - Predicted)")
+    plt.title("Residual Plot")
+    plt.legend()
+    plt.tight_layout()
+    output_path = out_dir / "residual_plot_all_models.png"
+    plt.savefig(output_path, dpi=180)
+    plt.close()
     return output_path
 
 
@@ -240,18 +318,27 @@ def main() -> None:
         default=Path("results/explore"),
         help="Output directory for metrics and plots.",
     )
+    parser.add_argument(
+        "--benchmark-predictions",
+        type=Path,
+        default=Path("results/benchmark/all/benchmark_predictions_test.csv"),
+        help="Benchmark prediction CSV path containing random_forest/xgboost outputs.",
+    )
     args = parser.parse_args()
 
     train_path = _resolve_path(root, args.train)
     test_path = _resolve_path(root, args.test)
     out_dir = _resolve_path(root, args.output_dir)
+    benchmark_pred_path = _resolve_path(root, args.benchmark_predictions)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     train_df = add_mte_features(load_split_data(train_path))
     test_df = add_mte_features(load_split_data(test_path))
+    benchmark_predictions = load_benchmark_predictions(benchmark_pred_path, test_df)
 
-    metrics_df = run_models(train_df, test_df)
+    metrics_df, predictions, y_true = run_models(train_df, test_df, benchmark_predictions)
     plot_path = save_model_performance_plot(metrics_df, out_dir)
+    residual_plot_path = save_residual_plot(y_true, predictions, out_dir)
 
     metrics_path = out_dir / "explore_metrics.csv"
 
@@ -259,6 +346,7 @@ def main() -> None:
 
     print(f"Saved metrics: {metrics_path}")
     print(f"Saved plot: {plot_path}")
+    print(f"Saved residual plot: {residual_plot_path}")
     print("\nModel metrics:")
     print(metrics_df.to_string(index=False))
 

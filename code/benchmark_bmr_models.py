@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
 TARGET = "BMR"
-MODEL_NAMES = ["power_law_3_4", "random_forest", "xgboost"]
+MODEL_NAMES = ["random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["wet_Mass_kg"]
 GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "all": None,
@@ -125,8 +125,6 @@ def train_and_predict(
         train_df, test_df, alpha, TREE_MODEL_FEATURES
     )
 
-    yhat_base = np.exp(rf_test_base)
-
     rf = RandomForestRegressor(
         n_estimators=500,
         max_depth=8,
@@ -152,7 +150,6 @@ def train_and_predict(
     yhat_xgb = np.exp(xgb_test_base + xgb.predict(X_test_xgb))
 
     preds = {
-        "power_law_3_4": yhat_base,
         "random_forest": yhat_rf,
         "xgboost": yhat_xgb,
     }
@@ -233,14 +230,6 @@ def save_pred_and_residual_plots(out_dir: Path, pred_df: pd.DataFrame) -> None:
             alpha=0.55,
             color="#1f77b4",
             label=f"{model} prediction",
-        )
-        plt.scatter(
-            pred_df["y_true"],
-            pred_df["y_true"],
-            s=12,
-            alpha=0.35,
-            color="#ff7f0e",
-            label="observed",
         )
         min_v = float(min(pred_df["y_true"].min(), pred_df[model].min()))
         max_v = float(max(pred_df["y_true"].max(), pred_df[model].max()))
