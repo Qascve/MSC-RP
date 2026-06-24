@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-OUTPUT_COLUMNS = [
+K_BOLTZMANN_EV_PER_K = 8.617e-5
+
+BASE_COLUMNS = [
     "class",
     "order",
     "family",
@@ -27,6 +29,14 @@ OUTPUT_COLUMNS = [
     "pc4",
     "pc5",
 ]
+
+DERIVED_COLUMNS = [
+    "log_mass",
+    "log_BMR",
+    "inv_kT",
+]
+
+OUTPUT_COLUMNS = [*BASE_COLUMNS, *DERIVED_COLUMNS]
 
 
 def find_root(marker: str = ".gitignore") -> Path:
@@ -55,7 +65,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/splits"),
+        default=Path("data/splits/stratified"),
         help="Output directory containing train/test CSV files.",
     )
     parser.add_argument(
@@ -76,11 +86,11 @@ def main() -> None:
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     df = pd.read_csv(input_path)
-    missing = [c for c in OUTPUT_COLUMNS if c not in df.columns]
+    missing = [c for c in BASE_COLUMNS if c not in df.columns]
     if missing:
         raise KeyError(f"Missing required columns: {', '.join(missing)}")
 
-    out = df[OUTPUT_COLUMNS].copy()
+    out = df[BASE_COLUMNS].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
     out["class"] = out["class"].astype("string").str.strip()
     numeric_cols = [
@@ -98,10 +108,18 @@ def main() -> None:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     # Keep only valid rows and avoid fabricated data by strict filtering.
-    out = out.dropna(subset=OUTPUT_COLUMNS).copy()
+    out = out.dropna(subset=BASE_COLUMNS).copy()
     out = out[(out["wet_Mass_kg"] > 0) & (out["BMR"] > 0)].copy()
     out = out[out["taxon_name"] != ""].copy()
     out = out[out["class"] != ""].copy()
+
+    out = out[(out["temperature"] + 273.15) > 0].copy()
+    temp_k = out["temperature"] + 273.15
+    out["log_mass"] = np.log(out["wet_Mass_kg"].to_numpy())
+    out["log_BMR"] = np.log(out["BMR"].to_numpy())
+    out["inv_kT"] = 1.0 / (K_BOLTZMANN_EV_PER_K * temp_k.to_numpy())
+    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=OUTPUT_COLUMNS).copy()
+
     out = out.reset_index(drop=True)
 
     if out.empty:

@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -134,10 +137,96 @@ def load_benchmark_predictions(path: Path, test_df: pd.DataFrame) -> dict[str, n
     }
 
 
+def run_pgls_with_caper(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    root: Path,
+    tree_path: Path,
+    r_script_path: Path,
+) -> np.ndarray:
+    rscript = shutil.which("Rscript")
+    if rscript is None:
+        raise RuntimeError(
+            "Rscript not found in PATH. Please install R and make sure Rscript is available."
+        )
+
+    resolved_tree_path = _resolve_path(root, tree_path)
+    resolved_r_script_path = _resolve_path(root, r_script_path)
+    if not resolved_tree_path.exists():
+        raise FileNotFoundError(f"Phylogeny tree file not found: {resolved_tree_path}")
+    if not resolved_r_script_path.exists():
+        raise FileNotFoundError(f"PGLS R script not found: {resolved_r_script_path}")
+
+    train_for_r = train_df[["taxon_name", "log_mass", "inv_kT", "log_BMR"]].copy()
+    test_for_r = test_df[["taxon_name", "log_mass", "inv_kT"]].copy()
+    test_for_r.insert(0, "row_id", np.arange(len(test_for_r), dtype=int))
+
+    with tempfile.TemporaryDirectory(prefix="pgls_caper_") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        train_csv = tmp_root / "train_pgls.csv"
+        test_csv = tmp_root / "test_pgls.csv"
+        pred_csv = tmp_root / "pgls_predictions.csv"
+        train_for_r.to_csv(train_csv, index=False, encoding="utf-8")
+        test_for_r.to_csv(test_csv, index=False, encoding="utf-8")
+
+        cmd = [
+            rscript,
+            str(resolved_r_script_path),
+            "--train",
+            str(train_csv),
+            "--test",
+            str(test_csv),
+            "--tree",
+            str(resolved_tree_path),
+            "--output",
+            str(pred_csv),
+        ]
+        completed = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "PGLS (caper) failed.\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"stdout:\n{completed.stdout}\n"
+                f"stderr:\n{completed.stderr}"
+            )
+        if not pred_csv.exists():
+            raise RuntimeError("PGLS output file was not generated.")
+
+        pred_df = pd.read_csv(pred_csv)
+
+    required = ["row_id", "y_pred"]
+    missing = [c for c in required if c not in pred_df.columns]
+    if missing:
+        raise KeyError(f"PGLS output missing required columns: {', '.join(missing)}")
+
+    pred_df["row_id"] = pd.to_numeric(pred_df["row_id"], errors="coerce")
+    pred_df["y_pred"] = pd.to_numeric(pred_df["y_pred"], errors="coerce")
+    pred_df = pred_df.dropna(subset=["row_id"]).copy()
+    pred_df["row_id"] = pred_df["row_id"].astype(int)
+    pred_df = pred_df.sort_values("row_id").reset_index(drop=True)
+
+    if len(pred_df) != len(test_df):
+        raise ValueError(
+            "PGLS output row count mismatch with test data. "
+            "Please check row_id handling in the R script."
+        )
+    expected_row_ids = np.arange(len(test_df), dtype=int)
+    if not np.array_equal(pred_df["row_id"].to_numpy(), expected_row_ids):
+        raise ValueError("PGLS output row_id is not aligned with test data order.")
+
+    return pred_df["y_pred"].to_numpy(dtype=float)
+
+
 def run_models(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     benchmark_predictions: dict[str, np.ndarray],
+    pgls_predictions: np.ndarray,
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     y_train_log = train_df["log_BMR"].to_numpy()
 
@@ -192,6 +281,7 @@ def run_models(
         "m0_fixed_b_3_4": np.exp(yhat_m0_log),
         "m1_estimated_b": np.exp(yhat_m1_log),
         "m2_baseline_mte": np.exp(yhat_m2_log),
+        "pgls_caper_mte": pgls_predictions,
         **benchmark_predictions,
     }
 
@@ -224,6 +314,14 @@ def run_models(
         predictions["m3_clade_specific_mte"] = y_pred_m3_full
         metric_rows.append({"model": "m3_clade_specific_mte", **evaluate(y_true_m3, y_pred_m3)})
 
+    pgls_mask = ~np.isnan(predictions["pgls_caper_mte"])
+    if bool(pgls_mask.any()):
+        metric_rows.append(
+            {
+                "model": "pgls_caper_mte",
+                **evaluate(y_true[pgls_mask], predictions["pgls_caper_mte"][pgls_mask]),
+            }
+        )
     metric_rows.append(
         {
             "model": "random_forest",
@@ -296,7 +394,7 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Fit four MTE-style linear models equivalent to R formulas m0-m3 "
+            "Fit MTE-style models m0-m3 plus a caper::pgls model "
             "using stratified train/test splits."
         )
     )
@@ -324,6 +422,18 @@ def main() -> None:
         default=Path("results/benchmark/all/benchmark_predictions_test.csv"),
         help="Benchmark prediction CSV path containing random_forest/xgboost outputs.",
     )
+    parser.add_argument(
+        "--phylo-tree",
+        type=Path,
+        default=Path("data/phylogeny/unique_taxon_names.nwk"),
+        help="Newick tree file used by caper::pgls.",
+    )
+    parser.add_argument(
+        "--pgls-r-script",
+        type=Path,
+        default=Path("code/pgls_caper.R"),
+        help="R script path for fitting caper::pgls and predicting test data.",
+    )
     args = parser.parse_args()
 
     train_path = _resolve_path(root, args.train)
@@ -335,8 +445,20 @@ def main() -> None:
     train_df = add_mte_features(load_split_data(train_path))
     test_df = add_mte_features(load_split_data(test_path))
     benchmark_predictions = load_benchmark_predictions(benchmark_pred_path, test_df)
+    pgls_predictions = run_pgls_with_caper(
+        train_df=train_df,
+        test_df=test_df,
+        root=root,
+        tree_path=args.phylo_tree,
+        r_script_path=args.pgls_r_script,
+    )
 
-    metrics_df, predictions, y_true = run_models(train_df, test_df, benchmark_predictions)
+    metrics_df, predictions, y_true = run_models(
+        train_df,
+        test_df,
+        benchmark_predictions,
+        pgls_predictions,
+    )
     plot_path = save_model_performance_plot(metrics_df, out_dir)
     residual_plot_path = save_residual_plot(y_true, predictions, out_dir)
 

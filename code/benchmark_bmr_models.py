@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -14,8 +16,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
 TARGET = "BMR"
+LOG_TARGET = "log_BMR"
 MODEL_NAMES = ["random_forest", "xgboost"]
-POWER_LAW_FEATURES = ["wet_Mass_kg"]
+POWER_LAW_FEATURES = ["log_mass"]
 GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "all": None,
     "a": "Teleostei",
@@ -28,8 +31,8 @@ TREE_MODEL_FEATURES = [
     "family",
     "Genus",
     "species",
-    "wet_Mass_kg",
-    "temperature",
+    "log_mass",
+    "inv_kT",
     "pc1",
     "pc2",
     "pc3",
@@ -49,7 +52,7 @@ def find_root(marker: str = ".gitignore") -> Path:
 
 def load_split_data(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    required = ["taxon_name", *TREE_MODEL_FEATURES, TARGET]
+    required = ["taxon_name", *TREE_MODEL_FEATURES, TARGET, LOG_TARGET]
     required = list(dict.fromkeys(required))
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -58,24 +61,22 @@ def load_split_data(path: Path) -> pd.DataFrame:
     out = df[required].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
     categorical_features = ["class", "order", "family", "Genus", "species"]
-    numeric_features = ["wet_Mass_kg", "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
+    numeric_features = ["log_mass", "inv_kT", "pc1", "pc2", "pc3", "pc4", "pc5"]
     for col in categorical_features:
         out[col] = out[col].astype("string").str.strip()
-    for col in numeric_features + [TARGET]:
+    for col in numeric_features + [TARGET, LOG_TARGET]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out["taxon_name"] = out["taxon_name"].replace("", pd.NA)
     for col in categorical_features:
         out[col] = out[col].replace("", pd.NA)
     out = out.dropna(subset=required).copy()
-    out = out[(out["wet_Mass_kg"] > 0) & (out[TARGET] > 0)].copy()
+    out = out[(out["log_mass"].notna()) & (out["inv_kT"].notna()) & (out[TARGET] > 0)].copy()
     out = out[out["taxon_name"] != ""].copy()
     return out.reset_index(drop=True)
 
 
-def fit_alpha_three_quarter(mass_kg: np.ndarray, bmr_w: np.ndarray) -> float:
-    log_m = np.log(mass_kg)
-    log_y = np.log(bmr_w)
-    return float(np.mean(log_y - 0.75 * log_m))
+def fit_alpha_three_quarter(log_mass: np.ndarray, log_bmr: np.ndarray) -> float:
+    return float(np.mean(log_bmr - 0.75 * log_mass))
 
 
 def build_residual_feature_frames(
@@ -84,8 +85,8 @@ def build_residual_feature_frames(
     mass_col = POWER_LAW_FEATURES[0]
     train_mass = train_df[mass_col].to_numpy()
     test_mass = test_df[mass_col].to_numpy()
-    train_log_base = alpha + 0.75 * np.log(train_mass)
-    test_log_base = alpha + 0.75 * np.log(test_mass)
+    train_log_base = alpha + 0.75 * train_mass
+    test_log_base = alpha + 0.75 * test_mass
 
     categorical_features = ["class", "order", "family", "Genus", "species"]
     tree_categorical_features = [col for col in model_features if col in categorical_features]
@@ -102,8 +103,6 @@ def build_residual_feature_frames(
     split_idx = len(train_raw)
     X_train_res = merged_encoded.iloc[:split_idx].copy()
     X_test_res = merged_encoded.iloc[split_idx:].copy()
-    X_train_res["log_mass"] = np.log(train_mass)
-    X_test_res["log_mass"] = np.log(test_mass)
     X_train_res["base_log_pred"] = train_log_base
     X_test_res["base_log_pred"] = test_log_base
     return X_train_res, X_test_res, train_log_base, test_log_base
@@ -113,10 +112,9 @@ def train_and_predict(
     train_df: pd.DataFrame, test_df: pd.DataFrame, random_state: int
 ) -> tuple[dict[str, np.ndarray], dict[str, object], dict[str, pd.DataFrame]]:
     y_train = train_df[TARGET].to_numpy()
-    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), y_train)
-    residual_train = np.log(y_train) - (
-        alpha + 0.75 * np.log(train_df[POWER_LAW_FEATURES[0]].to_numpy())
-    )
+    log_y_train = train_df[LOG_TARGET].to_numpy()
+    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), log_y_train)
+    residual_train = log_y_train - (alpha + 0.75 * train_df[POWER_LAW_FEATURES[0]].to_numpy())
 
     X_train_rf, X_test_rf, _rf_train_base, rf_test_base = build_residual_feature_frames(
         train_df, test_df, alpha, TREE_MODEL_FEATURES
@@ -169,12 +167,12 @@ def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
 def save_loss_curve(
     train_df: pd.DataFrame, test_df: pd.DataFrame, out_dir: Path, random_state: int
 ) -> pd.DataFrame:
-    y_train = train_df[TARGET].to_numpy()
-    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), y_train)
+    log_y_train = train_df[LOG_TARGET].to_numpy()
+    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), log_y_train)
     X_train_res, _X_test_res, train_log_base, _test_log_base = build_residual_feature_frames(
         train_df, test_df, alpha, TREE_MODEL_FEATURES
     )
-    residual_train = np.log(y_train) - train_log_base
+    residual_train = log_y_train - train_log_base
 
     xgb_curve = XGBRegressor(
         objective="reg:squarederror",
