@@ -1,29 +1,39 @@
 # MSC-RP Workflow Guide
 
+## 1. Project Goal
 
-## 1. Project Goal (Code Perspective)
+This repository builds a reproducible workflow for the basal metabolic rate (BMR) analysis. It merges raw BMR, body mass, temperature, taxonomy, and phylogeny data; creates stratified train/test splits; and compares physics-inspired MTE models, tree-based residual-learning models, and a phylogenetic mixed model.
 
-For the BMR (basal metabolic rate) task, this project merges and cleans multiple raw datasets, builds phylogeny-based embedding features, creates stratified train/test splits, and evaluates both benchmark and exploratory models.
+Current processed split:
+- Total rows after cleaning and phylogeny merge: 5,672
+- Train rows: 3,970
+- Test rows: 1,702
+- Largest classes in the test split: `Teleostei` 1,190, `Mammalia` 140, `Insecta` 78
 
 ## 2. Environment Setup
 
-Run from the project root:
+Install Python dependencies from the project root:
 
 ```bash
 pip install -r requirements.txt
 ```
 
+The PGLMM step is run in R and additionally requires:
+
+```r
+install.packages(c("ape", "phyr"))
+```
+
 Notes:
-- `requirements.txt` contains Python dependencies.
-- `filter_target_classes.py` and `merge_bmr_mass_temp.py` may require internet access (GBIF/pytaxon).
+- `filter_target_classes.py` and `merge_bmr_mass_temp.py` may require internet access for taxonomy lookups through GBIF/pytaxon.
+- All commands below are intended to be run from the project root.
 
-## 3. Recommended Execution Order (Main Pipeline)
+## 3. Data Preparation Pipeline
 
-Run all commands from the project root.
+### Step 1: Merge Raw Datasets
 
-### Step 1: Merge three raw source datasets
+Script: `code/merge_bmr_mass_temp.py`
 
-Script: `code/merge_bmr_mass_temp.py`  
 Inputs:
 - `data/raw/pnas.2303764120.sd01.xlsx`
 - `data/raw/observations.xlsx`
@@ -32,101 +42,85 @@ Inputs:
 Output:
 - `data/cleaning/merged_bmr_mass_temperature.csv`
 
-Run:
-
 ```bash
 python code/merge_bmr_mass_temp.py
 ```
 
-Purpose:
-- Unify schema (mass, temperature, BMR, taxonomy fields, etc.).
-- Remove invalid records and duplicates.
-- Fill missing taxonomy fields (`class`/`order`/`family`) using GBIF when possible.
+This step unifies the raw schemas, removes invalid records and duplicates, and fills missing taxonomy fields where possible.
 
-### Step 2: Standardize taxon names + filter classes
+### Step 2: Standardize Taxa and Filter Classes
 
-Script: `code/filter_target_classes.py`  
+Script: `code/filter_target_classes.py`
+
 Inputs:
 - `data/cleaning/merged_bmr_mass_temperature.csv`
-- Config: `code/config.json`
+- `code/config.json`
 
 Outputs:
 - `data/cleaning/standard_data.csv`
 - `data/cleaning/filtered_data.csv`
 
-Run:
-
 ```bash
 python code/filter_target_classes.py
 ```
 
-Purpose:
-- Remove blacklist classes (defined in `EXCLUDED_CLASSES`).
-- Standardize species names via pytaxon and create `taxon_name`.
-- Apply a final safety filter using GBIF class lookups.
+This step standardizes species names, creates `taxon_name`, removes excluded classes, and applies a final taxonomy safety filter.
 
-### Step 3: Export taxon list for phylogeny matching
+### Step 3: Export Species Names
 
-Script: `code/export_taxon_names.py`  
+Script: `code/export_taxon_names.py`
+
 Input:
 - `data/cleaning/filtered_data.csv`
 
 Output:
 - `data/phylogeny/unique_taxon_names.txt`
 
-Run:
-
 ```bash
 python code/export_taxon_names.py
 ```
 
-Purpose:
-- Export unique `taxon_name` values (one per line) for tree matching.
+The exported species list is used for phylogenetic tree matching.
 
-### Step 4: Build phylogenetic embedding features from tree
+### Step 4: Build Phylogenetic Embeddings
 
-Script: `code/phylogeny.py`  
+Script: `code/phylogeny.py`
+
 Inputs:
-- Tree file: `data/phylogeny/unique_taxon_names.nwk`
-- Species list: `data/phylogeny/unique_taxon_names.txt`
+- `data/phylogeny/unique_taxon_names.nwk`
+- `data/phylogeny/unique_taxon_names.txt`
 
 Outputs:
 - `data/phylogeny/phylogenetic_embeddings.csv`
 - `data/phylogeny/phylogeny_matched_species.csv`
 
-Run:
-
 ```bash
 python code/phylogeny.py
 ```
 
-Purpose:
-- Match and prune tree tips against the species list.
-- Compute patristic distance matrix between species.
-- Run PCA on the distance matrix to produce `PC1`-`PC5` embeddings.
+This step matches and prunes tree tips, computes patristic distances, and converts the distance matrix into `PC1`-`PC5` phylogenetic embedding features.
 
-### Step 5: Merge observations with phylogenetic embeddings
+### Step 5: Merge Observations and Embeddings
 
-Script: `code/merge_phylo_embedding.py`  
+Script: `code/merge_phylo_embedding.py`
+
 Inputs:
-- `data/phylogeny/phylogenetic_embeddings.csv`
 - `data/cleaning/filtered_data.csv`
+- `data/phylogeny/phylogenetic_embeddings.csv`
 
 Output:
 - `data/merge_phylo.csv`
-
-Run:
 
 ```bash
 python code/merge_phylo_embedding.py
 ```
 
-Purpose:
-- Inner-join on `taxon_name` and append `pc1`-`pc5` to filtered observations.
+This joins cleaned observations with `pc1`-`pc5` by `taxon_name`.
 
-### Step 6: Create stratified train/test split by class
+### Step 6: Create Stratified Train/Test Split
 
-Script: `code/split_train_test_bmr.py`  
+Script: `code/split_train_test_bmr.py`
+
 Input:
 - `data/merge_phylo.csv`
 
@@ -135,19 +129,18 @@ Outputs:
 - `data/splits/stratified/test.csv`
 - `data/splits/stratified/class_split_summary.csv`
 
-Run:
-
 ```bash
 python code/split_train_test_bmr.py
 ```
 
-Purpose:
-- Apply strict row filtering and derive features: `log_mass`, `log_BMR`, `inv_kT`.
-- Perform class-stratified split so each class is represented in both train and test when possible.
+This step applies final row filters, derives `log_mass`, `log_BMR`, and `inv_kT`, then creates a class-stratified split.
 
-### Step 7: Train and evaluate benchmark models
+## 4. Model and Result Pipeline
 
-Script: `code/benchmark_bmr_models.py`  
+### Step 7: Residual-Learning Benchmark
+
+Script: `code/ml_residual_learning.py`
+
 Inputs:
 - `data/splits/stratified/train.csv`
 - `data/splits/stratified/test.csv`
@@ -155,51 +148,131 @@ Inputs:
 Output directory:
 - `results/benchmark/`
 
+```bash
+python code/ml_residual_learning.py
+```
+
+The benchmark fits residual Random Forest and XGBoost models on top of a fixed three-quarter power-law baseline. It evaluates the full test set plus selected class subsets:
+- `all`: all classes
+- `a`: `Teleostei`
+- `b`: `Mammalia`
+- `c`: `Insecta`
+
 Key outputs:
 - `results/benchmark/all/benchmark_predictions_test.csv`
 - `results/benchmark/*/benchmark_metrics.csv`
+- `results/benchmark/*/shap_feature_importance.csv`
+- `results/benchmark/*/shap_summary_bar.png`
+- `results/benchmark/*/shap_summary_beeswarm.png`
 - `results/benchmark/benchmark_summary_groups.csv`
 
-Run:
+Current best benchmark result on the full test set:
+- Model: `xgboost`
+- RMSE: 1.0325
+- MAE: 0.1391
+- R2: 0.9459
 
-```bash
-python code/benchmark_bmr_models.py
-```
+### Step 8: M0-M4 Tree-Based ML Comparison
 
-Purpose:
-- Evaluate models on full test set and selected class subsets (A/B/C groups).
-- Save predictions, error metrics, residual diagnostics, SHAP outputs, and summary tables.
+Script: `code/explore_ml.py`
 
-### Step 8: Run exploratory model comparison (MTE + benchmark predictions)
-
-Script: `code/explore.py`  
 Inputs:
 - `data/splits/stratified/train.csv`
 - `data/splits/stratified/test.csv`
-- `results/benchmark/all/benchmark_predictions_test.csv`
 
 Output directory:
 - `results/explore/`
 
-Run:
+```bash
+python code/explore_ml.py
+```
+
+This step compares Random Forest and XGBoost under M0-M4 feature settings and writes:
+- `results/explore/explore_ml_metrics.csv`
+- `results/explore/explore_ml_predictions_test.csv`
+- `results/explore/explore_ml_model_performance_comparison.png`
+- `results/explore/explore_ml_residual_plot.png`
+
+Current best model from this comparison:
+- Model: `xgboost_m3`
+- RMSE: 1.7923
+- MAE: 0.1994
+- R2: 0.8370
+
+### Step 9: PGLMM with `phyr`
+
+Script: `code/pglmm_phyr.R`
+
+Inputs:
+- `data/splits/stratified/train.csv`
+- `data/splits/stratified/test.csv`
+- `data/phylogeny/unique_taxon_names.nwk`
+- `data/phylogeny/phylogenetic_embeddings.csv`
+
+Output directory:
+- `results/pglmm_phyr/`
+
+```bash
+Rscript code/pglmm_phyr.R
+```
+
+This step fits a phylogenetic mixed model with `phyr::pglmm`, removes species under non-positive or missing tree branches, predicts the test set where possible, and writes model summaries and diagnostics.
+
+Key outputs:
+- `results/pglmm_phyr/pglmm_test_predictions.csv`
+- `results/pglmm_phyr/pglmm_train_fitted.csv`
+- `results/pglmm_phyr/pglmm_fixed_effects.csv`
+- `results/pglmm_phyr/pglmm_random_variance.csv`
+- `results/pglmm_phyr/pglmm_test_metrics.csv`
+- `results/pglmm_phyr/pglmm_metrics_summary.txt`
+- `results/pglmm_phyr/pglmm_model_summary.txt`
+- `results/pglmm_phyr/removed_bad_branch_species.csv`
+
+Current BMR-scale PGLMM test metrics:
+- Predicted test rows: 438
+- RMSE: 2.3559
+- MAE: 0.5066
+- R2: -0.0010
+
+### Step 10: Integrated MTE, PGLMM, and ML Comparison
+
+Script: `code/explore.py`
+
+Inputs:
+- `data/splits/stratified/train.csv`
+- `data/splits/stratified/test.csv`
+- `results/explore/explore_ml_predictions_test.csv`
+- `results/benchmark/all/benchmark_predictions_test.csv`
+- `results/pglmm_phyr/pglmm_test_predictions.csv`
+
+Output directory:
+- `results/explore/`
 
 ```bash
 python code/explore.py
 ```
 
-Purpose:
-- Fit and evaluate MTE-style models (`m0`-`m3`).
-- Compare against benchmark model predictions and produce integrated metrics/plots.
+This step fits linear MTE-style models (`M0-L` to `M3-L`), incorporates the PGLMM result as `M4-L`, imports M0-M4 ML predictions, and compares them with the residual-learning benchmark.
 
-Note:
-- This script includes a `--pgls-r-script` hook to call an external R script. Whether that R file is version-tracked depends on current Git tracking status.
+Key outputs:
+- `results/explore/explore_metrics.csv`
+- `results/explore/top5_plus_residual_learning_metrics.csv`
+- `results/explore/model_performance_comparison.png`
+- `results/explore/top5_plus_residual_learning_performance.png`
+- `results/explore/residual_plot_all_models.png`
 
-## 4. Utility Script
+Current top integrated results:
+- `Residual-XGB`: RMSE 1.0325, MAE 0.1391, R2 0.9459
+- `Residual-RF`: RMSE 1.0412, MAE 0.1591, R2 0.9450
+- `M3-L`: RMSE 1.0589, MAE 0.2322, R2 0.9431
+- `M2-L`: RMSE 1.3830, MAE 0.2631, R2 0.9029
+
+## 5. Utility Script
 
 ### `code/class_distribution.py`
 
 Purpose:
-- Summarize `class` distribution for one or more CSV files.
+- Summarize class distributions for one or more CSV files.
 
 Default output:
 - `data/cleaning/class_distribution.csv`
@@ -210,7 +283,7 @@ Example:
 python code/class_distribution.py --input data/cleaning/standard_data.csv
 ```
 
-## 5. Minimal Reproducible Command List
+## 6. Minimal Reproducible Command List
 
 ```bash
 python code/merge_bmr_mass_temp.py
@@ -219,7 +292,9 @@ python code/export_taxon_names.py
 python code/phylogeny.py
 python code/merge_phylo_embedding.py
 python code/split_train_test_bmr.py
-python code/benchmark_bmr_models.py
+python code/ml_residual_learning.py
+python code/explore_ml.py
+Rscript code/pglmm_phyr.R
 python code/explore.py
 ```
 

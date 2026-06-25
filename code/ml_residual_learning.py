@@ -124,8 +124,8 @@ def train_and_predict(
     )
 
     rf = RandomForestRegressor(
-        n_estimators=500,
-        max_depth=8,
+        n_estimators=600,
+        max_depth=4,
         min_samples_leaf=5,
         random_state=random_state,
         n_jobs=-1,
@@ -137,7 +137,7 @@ def train_and_predict(
         objective="reg:squarederror",
         n_estimators=600,
         learning_rate=0.05,
-        max_depth=4,
+        max_depth=8,
         subsample=0.9,
         colsample_bytree=0.9,
         reg_lambda=1.0,
@@ -383,7 +383,7 @@ def run_single_group(
 
 
 def main() -> None:
-    print("Running benchmark_bmr_models.py")
+    print("Running ml_residual_learning.py")
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
