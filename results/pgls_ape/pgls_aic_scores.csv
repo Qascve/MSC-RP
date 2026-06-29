@@ -1,0 +1,9 @@
+"model","status","AIC","logLik","message","delta_AIC"
+"pglsModel_Brownian","ok",-22429.7514117783,11218.8757058891,"",0
+"pglsModel_Grafen","ok",2232.65479259639,-1111.3273962982,"",24662.4062043747
+"pglsModel_Lambda","ok",2278.14800084738,-1134.07400042369,"",24707.8994126257
+"pglsModel_Martins","ok",2281.88396338114,-1135.94198169057,"",24711.6353751594
+"pglsModel_Blomberg","failed",NA,NA,"Error in corMatrix.corBlomberg(object) : 
+  the optimization has reached a value <= 0 for parameter 'g':
+probably need to set 'fixed = TRUE' in corBlomberg().
+",NA

@@ -23,7 +23,8 @@ LINEAR_NAME_MAP = {
     "m1_estimated_b": "M1-L",
     "m2_baseline_mte": "M2-L",
     "m3_clade_specific_mte": "M3-L",
-    "m4_pglmm_phyr_mte": "M4-L",
+    "m4_pglmm_phyr_mte": "M4-PGLMM",
+    "m4_pgls_ape_mte": "M4-PGLS",
 }
 
 
@@ -104,10 +105,19 @@ def build_design_m3(df: pd.DataFrame, clade_levels: list[str]) -> tuple[np.ndarr
 
 
 def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    if len(y_true) == 0:
+        return {"rmse": np.nan, "mae": np.nan, "r2": np.nan}
+    if len(y_true) < 2 or np.isclose(np.var(y_true), 0.0):
+        r2 = np.nan
+    else:
+        r2 = float(r2_score(y_true, y_pred))
     return {
         "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
         "mae": float(mean_absolute_error(y_true, y_pred)),
-        "r2": float(r2_score(y_true, y_pred)),
+        "r2": r2,
     }
 
 
@@ -190,6 +200,58 @@ def load_residual_learning_predictions(path: Path, test_df: pd.DataFrame) -> dic
     }
 
 
+def load_residual_learning_predictions_by_class(path: Path, test_df: pd.DataFrame) -> dict[str, np.ndarray]:
+    if not path.exists():
+        raise FileNotFoundError(f"Residual-learning benchmark directory not found: {path}")
+
+    combined = {
+        "Residual-RF": np.full(len(test_df), np.nan, dtype=float),
+        "Residual-XGB": np.full(len(test_df), np.nan, dtype=float),
+    }
+    loaded_classes: list[str] = []
+    for class_dir in sorted([p for p in path.iterdir() if p.is_dir()]):
+        pred_path = class_dir / "benchmark_predictions_test.csv"
+        if not pred_path.exists():
+            continue
+        class_name = class_dir.name
+        class_mask = test_df[CLADE_COL].astype("string").to_numpy() == class_name
+        if not bool(class_mask.any()):
+            continue
+
+        pred_df = pd.read_csv(pred_path)
+        required = ["taxon_name", "y_true", "random_forest", "xgboost"]
+        missing = [c for c in required if c not in pred_df.columns]
+        if missing:
+            raise KeyError(f"{pred_path.name} missing required columns: {', '.join(missing)}")
+
+        for col in ["y_true", "random_forest", "xgboost"]:
+            pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
+        pred_df = pred_df.dropna(subset=required).reset_index(drop=True)
+
+        class_test = test_df[class_mask].reset_index(drop=True)
+        if len(pred_df) != len(class_test):
+            raise ValueError(
+                f"Residual-learning predictions for {class_name} have {len(pred_df)} rows, "
+                f"but test split has {len(class_test)} rows for that class."
+            )
+        if not np.array_equal(
+            pred_df["taxon_name"].astype("string").to_numpy(),
+            class_test["taxon_name"].astype("string").to_numpy(),
+        ):
+            raise ValueError(f"Residual-learning predictions for {class_name} are not aligned by taxon_name.")
+        if not np.allclose(pred_df["y_true"].to_numpy(), class_test[TARGET].to_numpy(), rtol=1e-10, atol=1e-12):
+            raise ValueError(f"Residual-learning y_true for {class_name} is not aligned with test split.")
+
+        combined["Residual-RF"][class_mask] = pred_df["random_forest"].to_numpy(dtype=float)
+        combined["Residual-XGB"][class_mask] = pred_df["xgboost"].to_numpy(dtype=float)
+        loaded_classes.append(class_name)
+
+    if not loaded_classes:
+        raise ValueError(f"No class benchmark predictions loaded from: {path}")
+    print("Loaded residual-learning predictions for classes: " + ", ".join(loaded_classes))
+    return combined
+
+
 def run_pglmm_with_phyr(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
@@ -245,7 +307,6 @@ def run_pglmm_with_phyr(
         raise RuntimeError("PGLMM output file was not generated.")
 
     pred_df = pd.read_csv(pred_csv)
-
     required = ["row_id", "taxon_name", TARGET, "y_pred_BMR"]
     missing = [c for c in required if c not in pred_df.columns]
     if missing:
@@ -282,11 +343,105 @@ def run_pglmm_with_phyr(
     return pred_df["y_pred_BMR"].to_numpy(dtype=float)
 
 
+def run_pgls_with_ape(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    root: Path,
+    train_path: Path,
+    test_path: Path,
+    tree_path: Path,
+    r_script_path: Path,
+    out_dir: Path,
+) -> np.ndarray:
+    rscript = shutil.which("Rscript")
+    if rscript is None:
+        raise RuntimeError(
+            "Rscript not found in PATH. Please install R and make sure Rscript is available."
+        )
+
+    resolved_tree_path = _resolve_path(root, tree_path)
+    resolved_r_script_path = _resolve_path(root, r_script_path)
+    resolved_out_dir = _resolve_path(root, out_dir)
+    if not resolved_tree_path.exists():
+        raise FileNotFoundError(f"Phylogeny tree file not found: {resolved_tree_path}")
+    if not resolved_r_script_path.exists():
+        raise FileNotFoundError(f"PGLS R script not found: {resolved_r_script_path}")
+
+    cmd = [
+        rscript,
+        str(resolved_r_script_path),
+        "--train",
+        str(train_path),
+        "--test",
+        str(test_path),
+        "--tree",
+        str(resolved_tree_path),
+        "--out-dir",
+        str(resolved_out_dir),
+    ]
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "PGLS (ape/nlme) failed.\n"
+            f"Command: {' '.join(cmd)}\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+
+    pred_csv = resolved_out_dir / "pgls_test_predictions.csv"
+    if not pred_csv.exists():
+        raise RuntimeError("PGLS output file was not generated.")
+
+    pred_df = pd.read_csv(pred_csv)
+
+    required = ["row_id", "taxon_name", TARGET, "y_pred_BMR"]
+    missing = [c for c in required if c not in pred_df.columns]
+    if missing:
+        raise KeyError(f"PGLS output missing required columns: {', '.join(missing)}")
+
+    pred_df["row_id"] = pd.to_numeric(pred_df["row_id"], errors="coerce")
+    pred_df[TARGET] = pd.to_numeric(pred_df[TARGET], errors="coerce")
+    pred_df["y_pred_BMR"] = pd.to_numeric(pred_df["y_pred_BMR"], errors="coerce")
+    pred_df = pred_df.dropna(subset=["row_id"]).copy()
+    pred_df["row_id"] = pred_df["row_id"].astype(int)
+    pred_df = pred_df.sort_values("row_id").reset_index(drop=True)
+
+    if len(pred_df) != len(test_df):
+        raise ValueError(
+            "PGLS output row count mismatch with test data. "
+            "Please rerun pgls_ape.R on the same test split."
+        )
+    expected_row_ids = np.arange(len(test_df), dtype=int)
+    if not np.array_equal(pred_df["row_id"].to_numpy(), expected_row_ids):
+        raise ValueError("PGLS output row_id is not aligned with test data order.")
+    if not np.array_equal(
+        pred_df["taxon_name"].astype("string").to_numpy(),
+        test_df["taxon_name"].astype("string").to_numpy(),
+    ):
+        raise ValueError("PGLS output taxon_name is not aligned with test data order.")
+    if not np.allclose(
+        pred_df[TARGET].to_numpy(dtype=float),
+        test_df[TARGET].to_numpy(dtype=float),
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise ValueError("PGLS output BMR is not aligned with test data order.")
+
+    return pred_df["y_pred_BMR"].to_numpy(dtype=float)
+
+
 def run_models(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     benchmark_predictions: dict[str, np.ndarray],
     pglmm_predictions: np.ndarray,
+    pgls_predictions: np.ndarray,
+    residual_learning_predictions: dict[str, np.ndarray],
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     y_train_log = train_df["log_BMR"].to_numpy()
 
@@ -342,39 +497,51 @@ def run_models(
         "m1_estimated_b": np.exp(yhat_m1_log),
         "m2_baseline_mte": np.exp(yhat_m2_log),
         "m4_pglmm_phyr_mte": pglmm_predictions,
+        "m4_pgls_ape_mte": pgls_predictions,
         **benchmark_predictions,
+        **residual_learning_predictions,
     }
+
+    comparison_mask = np.ones(len(test_df), dtype=bool)
+    for y_pred in residual_learning_predictions.values():
+        comparison_mask &= np.isfinite(y_pred)
+    if not bool(comparison_mask.any()):
+        comparison_mask = np.ones(len(test_df), dtype=bool)
 
     metric_rows = []
     y_true = test_df[TARGET].to_numpy()
     metric_rows.append(
         {
             "model": "m0_fixed_b_3_4",
-            **evaluate(y_true, predictions["m0_fixed_b_3_4"]),
+            **evaluate(y_true[comparison_mask], predictions["m0_fixed_b_3_4"][comparison_mask]),
         }
     )
     metric_rows.append(
         {
             "model": "m1_estimated_b",
-            **evaluate(y_true, predictions["m1_estimated_b"]),
+            **evaluate(y_true[comparison_mask], predictions["m1_estimated_b"][comparison_mask]),
         }
     )
     metric_rows.append(
         {
             "model": "m2_baseline_mte",
-            **evaluate(y_true, predictions["m2_baseline_mte"]),
+            **evaluate(y_true[comparison_mask], predictions["m2_baseline_mte"][comparison_mask]),
         }
     )
 
     if len(test_df_m3) > 0:
-        y_true_m3 = test_df_m3[TARGET].to_numpy()
         y_pred_m3 = np.exp(yhat_m3_log)
         y_pred_m3_full = np.full(len(test_df), np.nan, dtype=float)
         y_pred_m3_full[known_mask.to_numpy()] = y_pred_m3
         predictions["m3_clade_specific_mte"] = y_pred_m3_full
-        metric_rows.append({"model": "m3_clade_specific_mte", **evaluate(y_true_m3, y_pred_m3)})
+        metric_rows.append(
+            {
+                "model": "m3_clade_specific_mte",
+                **evaluate(y_true[comparison_mask], y_pred_m3_full[comparison_mask]),
+            }
+        )
 
-    pglmm_mask = ~np.isnan(predictions["m4_pglmm_phyr_mte"])
+    pglmm_mask = ~np.isnan(predictions["m4_pglmm_phyr_mte"]) & comparison_mask
     if bool(pglmm_mask.any()):
         metric_rows.append(
             {
@@ -382,8 +549,22 @@ def run_models(
                 **evaluate(y_true[pglmm_mask], predictions["m4_pglmm_phyr_mte"][pglmm_mask]),
             }
         )
+    pgls_mask = ~np.isnan(predictions["m4_pgls_ape_mte"]) & comparison_mask
+    if bool(pgls_mask.any()):
+        metric_rows.append(
+            {
+                "model": "m4_pgls_ape_mte",
+                **evaluate(y_true[pgls_mask], predictions["m4_pgls_ape_mte"][pgls_mask]),
+            }
+        )
     for model_name in sorted(benchmark_predictions):
-        metric_rows.append({"model": model_name, **evaluate(y_true, predictions[model_name])})
+        metric_rows.append(
+            {"model": model_name, **evaluate(y_true[comparison_mask], predictions[model_name][comparison_mask])}
+        )
+    for model_name in sorted(residual_learning_predictions):
+        metric_rows.append(
+            {"model": model_name, **evaluate(y_true[comparison_mask], predictions[model_name][comparison_mask])}
+        )
 
     metrics_df = pd.DataFrame(metric_rows).sort_values("rmse").reset_index(drop=True)
     metrics_df["model"] = metrics_df["model"].map(to_short_model_name)
@@ -395,18 +576,21 @@ def run_models(
 def save_model_performance_plot(metrics_df: pd.DataFrame, out_dir: Path) -> Path:
     plot_df = metrics_df.copy()
     sns.set_theme(style="whitegrid")
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig_width = max(16.0, 0.75 * len(plot_df) + 10.0)
+    fig, axes = plt.subplots(1, 2, figsize=(fig_width, 6))
 
     sns.barplot(data=plot_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
     axes[0].set_title("RMSE")
-    axes[0].tick_params(axis="x", rotation=20)
+    axes[0].tick_params(axis="x", rotation=45, labelsize=9)
 
     sns.barplot(data=plot_df, x="model", y="r2", ax=axes[1], color="#C44E52")
     axes[1].set_title("R2")
-    axes[1].tick_params(axis="x", rotation=20)
+    axes[1].tick_params(axis="x", rotation=45, labelsize=9)
 
     for ax in axes:
         ax.set_xlabel("")
+        for label in ax.get_xticklabels():
+            label.set_horizontalalignment("right")
 
     fig.suptitle("Model Performance Comparison", fontsize=14)
     fig.tight_layout()
@@ -501,20 +685,20 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Fit MTE-style models m0-m3 plus a phyr::pglmm model "
-            "using stratified train/test splits."
+            "Fit MTE-style models m0-m3 plus PGLS, then combine them with "
+            "latest residual-learning benchmark predictions."
         )
     )
     parser.add_argument(
         "--train",
         type=Path,
-        default=Path("data/splits/stratified/train.csv"),
+        default=Path("data/splits/train.csv"),
         help="Train CSV path.",
     )
     parser.add_argument(
         "--test",
         type=Path,
-        default=Path("data/splits/stratified/test.csv"),
+        default=Path("data/splits/test.csv"),
         help="Test CSV path.",
     )
     parser.add_argument(
@@ -526,20 +710,20 @@ def main() -> None:
     parser.add_argument(
         "--benchmark-predictions",
         type=Path,
-        default=Path("results/explore/explore_ml_predictions_test.csv"),
-        help="Prediction CSV path containing random_forest_m0..m4 and xgboost_m0..m4 outputs.",
+        default=None,
+        help="Optional prediction CSV path containing random_forest_m0..m4 and xgboost_m0..m4 outputs.",
     )
     parser.add_argument(
         "--residual-learning-predictions",
         type=Path,
         default=Path("results/benchmark/all/benchmark_predictions_test.csv"),
-        help="Residual-learning all-dataset prediction CSV with random_forest and xgboost outputs.",
+        help="Latest all-test-set residual-learning prediction CSV with random_forest and xgboost outputs.",
     )
     parser.add_argument(
         "--phylo-tree",
         type=Path,
         default=Path("data/phylogeny/unique_taxon_names.nwk"),
-        help="Newick tree file used by phyr::pglmm.",
+        help="Newick tree file used by PGLMM and PGLS.",
     )
     parser.add_argument(
         "--pglmm-r-script",
@@ -553,18 +737,34 @@ def main() -> None:
         default=Path("results/pglmm_phyr"),
         help="Output directory used by pglmm_phyr.R.",
     )
+    parser.add_argument(
+        "--pgls-r-script",
+        type=Path,
+        default=Path("code/pgls_ape.R"),
+        help="R script path for fitting ape/nlme PGLS and predicting test data.",
+    )
+    parser.add_argument(
+        "--pgls-output-dir",
+        type=Path,
+        default=Path("results/pgls_ape"),
+        help="Output directory used by pgls_ape.R.",
+    )
     args = parser.parse_args()
 
     train_path = _resolve_path(root, args.train)
     test_path = _resolve_path(root, args.test)
     out_dir = _resolve_path(root, args.output_dir)
-    benchmark_pred_path = _resolve_path(root, args.benchmark_predictions)
+    benchmark_pred_path = _resolve_path(root, args.benchmark_predictions) if args.benchmark_predictions else None
     residual_learning_pred_path = _resolve_path(root, args.residual_learning_predictions)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     train_df = add_mte_features(load_split_data(train_path))
     test_df = add_mte_features(load_split_data(test_path))
-    benchmark_predictions = load_benchmark_predictions(benchmark_pred_path, test_df)
+    benchmark_predictions = (
+        load_benchmark_predictions(benchmark_pred_path, test_df)
+        if benchmark_pred_path is not None
+        else {}
+    )
     residual_learning_predictions = load_residual_learning_predictions(
         residual_learning_pred_path,
         test_df,
@@ -579,12 +779,24 @@ def main() -> None:
         r_script_path=args.pglmm_r_script,
         out_dir=args.pglmm_output_dir,
     )
+    pgls_predictions = run_pgls_with_ape(
+        train_df=train_df,
+        test_df=test_df,
+        root=root,
+        train_path=train_path,
+        test_path=test_path,
+        tree_path=args.phylo_tree,
+        r_script_path=args.pgls_r_script,
+        out_dir=args.pgls_output_dir,
+    )
 
     metrics_df, predictions, y_true = run_models(
         train_df,
         test_df,
         benchmark_predictions,
         pglmm_predictions,
+        pgls_predictions,
+        residual_learning_predictions,
     )
     plot_path = save_model_performance_plot(metrics_df, out_dir)
     top5_residual_plot_path, top5_residual_metrics_path = save_top5_plus_residual_learning_plot(

@@ -214,19 +214,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Compare RandomForest and XGBoost under M0-M4 feature settings "
-            "using stratified train/test splits."
+            "using the current species-block train/test split."
         )
     )
     parser.add_argument(
         "--train",
         type=Path,
-        default=Path("data/splits/stratified/train.csv"),
+        default=Path("data/splits/train.csv"),
         help="Train CSV path.",
     )
     parser.add_argument(
         "--test",
         type=Path,
-        default=Path("data/splits/stratified/test.csv"),
+        default=Path("data/splits/test.csv"),
         help="Test CSV path.",
     )
     parser.add_argument(

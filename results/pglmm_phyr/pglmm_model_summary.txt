@@ -1,22 +1,22 @@
 Linear mixed model fit by restricted maximum likelihood
 
 Call:log_BMR ~ log_mass + inv_kT
-<environment: 0x00000263a8e706c8>
+<environment: 0x000002ca73e9d6c8>
 
 logLik    AIC    BIC 
- -1285   2581   2604 
+ -1186   2384   2407 
 
 Random effects:
-               Variance Std.Dev
-1|taxon_name   0.004664  0.0683
-1|taxon_name__ 0.137211  0.3704
-residual       0.475471  0.6895
+                Variance   Std.Dev
+1|taxon_name   2.405e-07 0.0004904
+1|taxon_name__ 1.466e-01 0.3828327
+residual       3.978e-01 0.6306831
 
 Fixed effects:
                 Value Std.Error  Zscore    Pvalue    
-(Intercept)  2.468264  1.971794  1.2518 0.2106480    
-log_mass     0.781754  0.014247 54.8730 < 2.2e-16 ***
-inv_kT      -0.130872  0.039739 -3.2933 0.0009902 ***
+(Intercept)  5.119667  1.875403  2.7299  0.006335 ** 
+log_mass     0.791443  0.013365 59.2170 < 2.2e-16 ***
+inv_kT      -0.214067  0.040290 -5.3131 1.078e-07 ***
 ---
 Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
 

@@ -18,10 +18,10 @@ Install Python dependencies from the project root:
 pip install -r requirements.txt
 ```
 
-The PGLMM step is run in R and additionally requires:
+The PGLMM/PGLS steps are run in R and additionally require:
 
 ```r
-install.packages(c("ape", "phyr"))
+install.packages(c("ape", "nlme", "phytools", "phyr"))
 ```
 
 Notes:
@@ -153,7 +153,8 @@ python code/ml_residual_learning.py
 
 The benchmark fits residual Random Forest and XGBoost models on top of a fixed three-quarter power-law baseline. Following Roberts et al. for structured data, it now creates a class-level species-block validation split: within each class, complete species are assigned either to train or test, so the same `taxon_name` cannot appear in both. Training uses class-balanced sample weights to reduce domination by large classes.
 
-It trains on the all-class species-block training set and reports selected class subsets from the species-block test set:
+It trains on the all-class species-block training set and reports the full test set plus selected class subsets:
+- `all`: all classes in the species-block test set
 - `Teleostei`
 - `Mammalia`
 - `Insecta`
@@ -180,8 +181,8 @@ Current best benchmark result on the full test set:
 Script: `code/explore_ml.py`
 
 Inputs:
-- `data/splits/stratified/train.csv`
-- `data/splits/stratified/test.csv`
+- `data/splits/train.csv`
+- `data/splits/test.csv`
 
 Output directory:
 - `results/explore/`
@@ -202,51 +203,53 @@ Current best model from this comparison:
 - MAE: 0.1994
 - R2: 0.8370
 
-### Step 9: PGLMM with `phyr`
+### Step 9: PGLS Model Comparison with `ape` and `nlme`
 
-Script: `code/pglmm_phyr.R`
+Script: `code/pgls_ape.R`
 
 Inputs:
-- `data/splits/stratified/train.csv`
-- `data/splits/stratified/test.csv`
+- `data/splits/train.csv`
+- `data/splits/test.csv`
 - `data/phylogeny/unique_taxon_names.nwk`
-- `data/phylogeny/phylogenetic_embeddings.csv`
 
 Output directory:
-- `results/pglmm_phyr/`
+- `results/pgls_ape/`
 
 ```bash
-Rscript code/pglmm_phyr.R
+Rscript code/pgls_ape.R
 ```
 
-This step fits a phylogenetic mixed model with `phyr::pglmm`, removes species under non-positive or missing tree branches, predicts the test set where possible, and writes model summaries and diagnostics.
+This step fits PGLS models with the same fixed-effects formula, `log_BMR ~ log_mass + inv_kT`, and compares phylogenetic correlation structures by AIC:
+- Pagel lambda
+- Brownian
+- Martins
+- Blomberg
+- Grafen
 
 Key outputs:
-- `results/pglmm_phyr/pglmm_test_predictions.csv`
-- `results/pglmm_phyr/pglmm_train_fitted.csv`
-- `results/pglmm_phyr/pglmm_fixed_effects.csv`
-- `results/pglmm_phyr/pglmm_random_variance.csv`
-- `results/pglmm_phyr/pglmm_test_metrics.csv`
-- `results/pglmm_phyr/pglmm_metrics_summary.txt`
-- `results/pglmm_phyr/pglmm_model_summary.txt`
-- `results/pglmm_phyr/removed_bad_branch_species.csv`
+- `results/pgls_ape/pgls_aic_scores.csv`
+- `results/pgls_ape/pgls_test_predictions.csv`
+- `results/pgls_ape/pgls_train_fitted.csv`
+- `results/pgls_ape/pgls_test_metrics.csv`
+- `results/pgls_ape/pgls_best_model_summary.txt`
+- `results/pgls_ape/pgls_metrics_summary.txt`
 
-Current BMR-scale PGLMM test metrics:
-- Predicted test rows: 438
-- RMSE: 2.3559
-- MAE: 0.5066
-- R2: -0.0010
+Current BMR-scale PGLS test metrics:
+- Best correlation structure: `pglsModel_Brownian`
+- RMSE: 2.2985
+- MAE: 0.5911
+- R2: -0.0593
 
-### Step 10: Integrated MTE, PGLMM, and ML Comparison
+### Step 10: Integrated MTE, PGLMM, PGLS, and ML Comparison
 
 Script: `code/explore.py`
 
 Inputs:
-- `data/splits/stratified/train.csv`
-- `data/splits/stratified/test.csv`
-- `results/explore/explore_ml_predictions_test.csv`
+- `data/splits/train.csv`
+- `data/splits/test.csv`
 - `results/benchmark/all/benchmark_predictions_test.csv`
 - `results/pglmm_phyr/pglmm_test_predictions.csv`
+- `results/pgls_ape/pgls_test_predictions.csv`
 
 Output directory:
 - `results/explore/`
@@ -255,7 +258,7 @@ Output directory:
 python code/explore.py
 ```
 
-This step fits linear MTE-style models (`M0-L` to `M3-L`), incorporates the PGLMM result as `M4-L`, imports M0-M4 ML predictions, and compares them with the residual-learning benchmark.
+This step fits linear MTE-style models (`M0-L` to `M3-L`), runs the PGLMM result as `M4-L`, runs the PGLS result as `M5-PGLS`, imports the latest all-test residual-learning predictions, and compares all models on the same species-block test set.
 
 Key outputs:
 - `results/explore/explore_metrics.csv`
@@ -265,10 +268,11 @@ Key outputs:
 - `results/explore/residual_plot_all_models.png`
 
 Current top integrated results:
-- `Residual-XGB`: RMSE 1.0325, MAE 0.1391, R2 0.9459
-- `Residual-RF`: RMSE 1.0412, MAE 0.1591, R2 0.9450
-- `M3-L`: RMSE 1.0589, MAE 0.2322, R2 0.9431
-- `M2-L`: RMSE 1.3830, MAE 0.2631, R2 0.9029
+- `Residual-XGB`: RMSE 1.5599, MAE 0.3364, R2 0.5122
+- `M2-L`: RMSE 1.6872, MAE 0.4002, R2 0.4292
+- `M1-L`: RMSE 1.6890, MAE 0.4289, R2 0.4280
+- `M4-L` / PGLMM-phyr is included in the integrated plot.
+- `M5-PGLS` / ape-nlme PGLS is included in the integrated plot.
 
 ### Optional Step: Block Cross-validation
 

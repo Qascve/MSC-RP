@@ -20,6 +20,7 @@ LOG_TARGET = "log_BMR"
 MODEL_NAMES = ["random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["log_mass"]
 GROUP_CLASS_FILTERS: dict[str, str | None] = {
+    "all": None,
     "Teleostei": "Teleostei",
     "Mammalia": "Mammalia",
     "Insecta": "Insecta",
@@ -244,7 +245,7 @@ def train_and_predict(
         objective="reg:squarederror",
         n_estimators=6000,
         learning_rate=0.01,
-        max_depth=5,
+        max_depth=8,
         subsample=0.9,
         colsample_bytree=0.9,
         reg_lambda=1.0,
@@ -560,7 +561,10 @@ def main() -> None:
 
     summary_rows: list[dict[str, float | str]] = []
     for group_name, class_name in GROUP_CLASS_FILTERS.items():
-        group_test_df = test_df_all[test_df_all["class"] == class_name].copy()
+        if class_name is None:
+            group_test_df = test_df_all.copy()
+        else:
+            group_test_df = test_df_all[test_df_all["class"] == class_name].copy()
         if group_test_df.empty:
             raise ValueError(f"Group {group_name} has no rows for class={class_name}.")
 
@@ -577,7 +581,7 @@ def main() -> None:
         summary_rows.append(
             {
                 "group": group_name,
-                "class_filter": class_name,
+                "class_filter": class_name if class_name is not None else "ALL",
                 "test_rows": int(len(group_test_df)),
                 "best_model": str(best_row["model"]),
                 "best_rmse": float(best_row["rmse"]),
