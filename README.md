@@ -141,9 +141,8 @@ This step applies final row filters, derives `log_mass`, `log_BMR`, and `inv_kT`
 
 Script: `code/ml_residual_learning.py`
 
-Inputs:
-- `data/splits/stratified/train.csv`
-- `data/splits/stratified/test.csv`
+Input:
+- `data/merge_phylo.csv`
 
 Output directory:
 - `results/benchmark/`
@@ -152,19 +151,23 @@ Output directory:
 python code/ml_residual_learning.py
 ```
 
-The benchmark fits residual Random Forest and XGBoost models on top of a fixed three-quarter power-law baseline. It evaluates the full test set plus selected class subsets:
-- `all`: all classes
-- `a`: `Teleostei`
-- `b`: `Mammalia`
-- `c`: `Insecta`
+The benchmark fits residual Random Forest and XGBoost models on top of a fixed three-quarter power-law baseline. Following Roberts et al. for structured data, it now creates a class-level species-block validation split: within each class, complete species are assigned either to train or test, so the same `taxon_name` cannot appear in both. Training uses class-balanced sample weights to reduce domination by large classes.
+
+It trains on the all-class species-block training set and reports selected class subsets from the species-block test set:
+- `Teleostei`
+- `Mammalia`
+- `Insecta`
 
 Key outputs:
-- `results/benchmark/all/benchmark_predictions_test.csv`
+- `data/splits/train.csv`
+- `data/splits/test.csv`
+- `data/splits/class_species_block_split_summary.csv`
 - `results/benchmark/*/benchmark_metrics.csv`
 - `results/benchmark/*/shap_feature_importance.csv`
 - `results/benchmark/*/shap_summary_bar.png`
 - `results/benchmark/*/shap_summary_beeswarm.png`
 - `results/benchmark/benchmark_summary_groups.csv`
+- `results/benchmark/class_species_block_split_summary.csv`
 
 Current best benchmark result on the full test set:
 - Model: `xgboost`
@@ -266,6 +269,52 @@ Current top integrated results:
 - `Residual-RF`: RMSE 1.0412, MAE 0.1591, R2 0.9450
 - `M3-L`: RMSE 1.0589, MAE 0.2322, R2 0.9431
 - `M2-L`: RMSE 1.3830, MAE 0.2631, R2 0.9029
+
+### Optional Step: Block Cross-validation
+
+Script: `code/block_cv.py`
+
+Input:
+- `data/merge_phylo.csv`
+
+Default split output directory:
+- `data/splits/block_cv/`
+
+Default summary output directory:
+- `results/block_cv/`
+
+```bash
+python code/block_cv.py
+```
+
+This creates two Roberts-style blocked validation datasets without changing the existing stratified split.
+
+Dataset 1: `fair_all`
+- Purpose: all classes appear in training and testing, while species are kept as complete blocks.
+- Bias control: residual-learning models use class-balanced sample weights, and reports include micro, macro-class, capped weighted macro-class, per-class, and per-block metrics.
+- Outputs:
+  - `data/splits/block_cv/fair_all/fold_*/train.csv`
+  - `data/splits/block_cv/fair_all/fold_*/test.csv`
+  - `results/block_cv/fair_all/cv_predictions.csv`
+  - `results/block_cv/fair_all/fold_metrics.csv`
+  - `results/block_cv/fair_all/metric_summary.csv`
+  - `results/block_cv/fair_all/per_class_metrics.csv`
+  - `results/block_cv/fair_all/per_block_metrics.csv`
+
+Dataset 2: `leave_class_out`
+- Purpose: train without one target class, then predict that held-out class.
+- Groups:
+  - `A`: train without `Teleostei`, predict `Teleostei`.
+  - `B`: train without `Mammalia`, predict `Mammalia`.
+  - `C`: train without `Insecta`, predict `Insecta`.
+- Outputs:
+  - `data/splits/block_cv/leave_class_out/A|B|C/train.csv`
+  - `data/splits/block_cv/leave_class_out/A|B|C/test.csv`
+  - `results/block_cv/leave_class_out/A|B|C/benchmark_predictions_test.csv`
+  - `results/block_cv/leave_class_out/A|B|C/benchmark_metrics.csv`
+  - `results/block_cv/leave_class_out/benchmark_summary_groups.csv`
+
+Use `--skip-models` to only write train/test CSV files.
 
 ## 5. Utility Script
 

@@ -78,24 +78,27 @@ def predict_ols(X: np.ndarray, coef: np.ndarray) -> np.ndarray:
     return X @ coef
 
 
-def build_design_m3(df: pd.DataFrame, clade_code: np.ndarray) -> tuple[np.ndarray, list[str]]:
+def build_design_m3(df: pd.DataFrame, clade_levels: list[str]) -> tuple[np.ndarray, list[str]]:
     x_log_mass = df["log_mass"].to_numpy()
     x_inv_kT = df["inv_kT"].to_numpy()
-    x_clade = clade_code.astype(float)
+    clade_dummies = pd.get_dummies(df[CLADE_COL], dtype=float).reindex(
+        columns=clade_levels[1:],
+        fill_value=0.0,
+    )
 
     X = np.column_stack(
         [
             np.ones(len(df), dtype=float),
             x_log_mass,
             x_inv_kT,
-            x_clade,
+            clade_dummies.to_numpy(dtype=float),
         ]
     )
     names = [
         "Intercept",
         "log_mass",
         "inv_kT",
-        "clade_code",
+        *[f"{CLADE_COL}[T.{clade}]" for clade in clade_levels[1:]],
     ]
     return X, names
 
@@ -315,12 +318,11 @@ def run_models(
     coef_m2 = fit_ols(X2_train, y_train_log)
     yhat_m2_log = predict_ols(X2_test, coef_m2)
 
-    # m3: log_BMR ~ log_mass + inv_kT + clade_code
-    # clade_code is integer encoded from class labels.
+    # m3: log_BMR ~ log_mass + inv_kT + class
+    # class is treatment-coded as a categorical predictor.
     clade_levels = sorted(train_df[CLADE_COL].dropna().unique().tolist())
     if not clade_levels:
         raise ValueError("No clade levels available in train data.")
-    clade_to_code = {clade: idx for idx, clade in enumerate(clade_levels)}
 
     known_mask = test_df[CLADE_COL].isin(clade_levels)
     if not bool(known_mask.all()):
@@ -329,10 +331,8 @@ def run_models(
             f"Warning: dropped {dropped_n} test rows with unseen clade values for m3."
         )
     test_df_m3 = test_df[known_mask].copy()
-    train_clade_code = train_df[CLADE_COL].map(clade_to_code).to_numpy(dtype=float)
-    test_clade_code = test_df_m3[CLADE_COL].map(clade_to_code).to_numpy(dtype=float)
-    X3_train, names_m3 = build_design_m3(train_df, train_clade_code)
-    X3_test, _ = build_design_m3(test_df_m3, test_clade_code)
+    X3_train, names_m3 = build_design_m3(train_df, clade_levels)
+    X3_test, _ = build_design_m3(test_df_m3, clade_levels)
     coef_m3 = fit_ols(X3_train, y_train_log)
     yhat_m3_log = predict_ols(X3_test, coef_m3)
 
