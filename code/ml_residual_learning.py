@@ -13,6 +13,7 @@ import seaborn as sns
 import shap
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBRegressor
 
 TARGET = "BMR"
@@ -207,9 +208,15 @@ def build_residual_feature_frames(
 
 
 def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
-    class_counts = train_df["class"].value_counts(dropna=False)
-    weights = train_df["class"].map(lambda x: 1.0 / float(class_counts.loc[x])).to_numpy(dtype=float)
-    return weights / weights.mean()
+    classes = train_df["class"].to_numpy()
+    unique_classes = np.unique(classes)
+    class_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=unique_classes,
+        y=classes)
+    weight_map = dict(zip(unique_classes, class_weights))
+    sample_weight = np.array([weight_map[c] for c in classes], dtype=float)
+    return sample_weight
 
 
 def train_and_predict(
