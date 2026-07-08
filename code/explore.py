@@ -710,7 +710,7 @@ def main() -> None:
     parser.add_argument(
         "--benchmark-predictions",
         type=Path,
-        default=None,
+        default=Path("results/explore/explore_ml_predictions_test.csv"),
         help="Optional prediction CSV path containing random_forest_m0..m4 and xgboost_m0..m4 outputs.",
     )
     parser.add_argument(

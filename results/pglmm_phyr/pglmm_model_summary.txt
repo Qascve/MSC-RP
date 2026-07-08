@@ -1,7 +1,7 @@
 Linear mixed model fit by restricted maximum likelihood
 
 Call:log_BMR ~ log_mass + inv_kT
-<environment: 0x00000254aae5e6c8>
+<environment: 0x00000111adf1f7a8>
 
 logLik    AIC    BIC 
  -1186   2384   2407 

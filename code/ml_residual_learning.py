@@ -20,6 +20,8 @@ TARGET = "BMR"
 LOG_TARGET = "log_BMR"
 MODEL_NAMES = ["random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["log_mass"]
+TAXONOMY_MODEL_FEATURES = ["Genus", "species"]
+TAXONOMY_METADATA_COLUMNS = ["class", "order", "family", "Genus", "species"]
 GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "all": None,
     "Teleostei": "Teleostei",
@@ -47,11 +49,7 @@ BASE_COLUMNS = [
     "pc5",
 ]
 TREE_MODEL_FEATURES = [
-    "class",
-    "order",
-    "family",
-    "Genus",
-    "species",
+    *TAXONOMY_MODEL_FEATURES,
     "log_mass",
     "inv_kT",
     "pc1",
@@ -81,7 +79,7 @@ def load_split_data(path: Path) -> pd.DataFrame:
 
     out = df[required].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
-    categorical_features = ["class", "order", "family", "Genus", "species"]
+    categorical_features = TAXONOMY_MODEL_FEATURES
     numeric_features = ["log_mass", "inv_kT", "pc1", "pc2", "pc3", "pc4", "pc5"]
     for col in categorical_features:
         out[col] = out[col].astype("string").str.strip()
@@ -103,7 +101,7 @@ def load_full_data(path: Path) -> pd.DataFrame:
         raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
 
     out = df[BASE_COLUMNS].copy()
-    categorical_features = ["class", "order", "family", "Genus", "species", "taxon_name"]
+    categorical_features = [*TAXONOMY_METADATA_COLUMNS, "taxon_name"]
     numeric_features = ["wet_Mass_kg", TARGET, "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
     for col in categorical_features:
         out[col] = out[col].astype("string").str.strip().replace("", pd.NA)
@@ -187,7 +185,7 @@ def build_residual_feature_frames(
     train_log_base = alpha + 0.75 * train_mass
     test_log_base = alpha + 0.75 * test_mass
 
-    categorical_features = ["class", "order", "family", "Genus", "species"]
+    categorical_features = TAXONOMY_MODEL_FEATURES
     tree_categorical_features = [col for col in model_features if col in categorical_features]
     train_raw = train_df[model_features].reset_index(drop=True).copy()
     test_raw = test_df[model_features].reset_index(drop=True).copy()
@@ -470,7 +468,8 @@ def run_single_group(
     metrics_df = pd.DataFrame(metrics_rows).sort_values("rmse")
     metrics_df.to_csv(out_dir / "benchmark_metrics.csv", index=False, encoding="utf-8")
 
-    pred_df = test_df[["taxon_name", *TREE_MODEL_FEATURES]].copy()
+    prediction_columns = list(dict.fromkeys(["taxon_name", *TAXONOMY_METADATA_COLUMNS, *TREE_MODEL_FEATURES]))
+    pred_df = test_df[prediction_columns].copy()
     pred_df["y_true"] = y_test
     for model in MODEL_NAMES:
         pred_df[model] = preds[model]
