@@ -1,8 +1,10 @@
 "model","status","AIC","logLik","message","delta_AIC"
-"pglsModel_Brownian","ok",-22429.7514117783,11218.8757058891,"",0
-"pglsModel_Grafen","ok",2232.65479259639,-1111.3273962982,"",24662.4062043747
-"pglsModel_Lambda","ok",2278.14800084738,-1134.07400042369,"",24707.8994126257
-"pglsModel_Martins","ok",2281.88396338114,-1135.94198169057,"",24711.6353751594
+"pglsModel_Brownian","ok",-21582.0958739112,10795.0479369556,"",0
+"pglsModel_Lambda","ok",2094.07751542685,-1042.03875771343,"",23676.1733893381
+"pglsModel_Grafen","ok",2120.48679821276,-1055.24339910638,"",23702.582672124
+"pglsModel_Martins","failed",NA,NA,"Error in corFactor.corStruct(object) : 
+  NA/NaN/Inf in foreign function call (arg 1)
+",NA
 "pglsModel_Blomberg","failed",NA,NA,"Error in corMatrix.corBlomberg(object) : 
   the optimization has reached a value <= 0 for parameter 'g':
 probably need to set 'fixed = TRUE' in corBlomberg().

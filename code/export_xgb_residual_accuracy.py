@@ -6,6 +6,11 @@ import html
 import math
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.cm import ScalarMappable
 import numpy as np
 import pandas as pd
 from Bio import Phylo
@@ -217,6 +222,22 @@ def edge_path(parent_radius: float, parent_angle: float, child_radius: float, ch
     )
 
 
+def circular_edge_points(
+    parent_radius: float,
+    parent_angle: float,
+    child_radius: float,
+    child_angle: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    arc_steps = max(3, int(abs(child_angle - parent_angle) / (2.0 * math.pi) * 240))
+    arc_angles = np.linspace(parent_angle, child_angle, arc_steps)
+    arc_x = parent_radius * np.cos(arc_angles)
+    arc_y = parent_radius * np.sin(arc_angles)
+    radial_r = np.linspace(parent_radius, child_radius, 3)
+    radial_x = radial_r * math.cos(child_angle)
+    radial_y = radial_r * math.sin(child_angle)
+    return np.concatenate([arc_x, radial_x]), np.concatenate([arc_y, radial_y])
+
+
 def clade_accuracy(clade: Phylo.BaseTree.Clade, tip_accuracy: dict[str, float]) -> float:
     if clade.is_terminal():
         return tip_accuracy.get(clade.name, np.nan)
@@ -384,6 +405,47 @@ def write_interactive_html(
     output_path.write_text(html_text, encoding="utf-8")
 
 
+def write_static_png(
+    tree: Phylo.BaseTree.Tree,
+    tip_accuracy: dict[str, float],
+    output_path: Path,
+) -> None:
+    radius_by_clade, angle_by_clade, _descendant_counts = assign_clade_layout(tree)
+    clade_accuracy_cache = {id(clade): clade_accuracy(clade, tip_accuracy) for clade in tree.find_clades()}
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+    for parent in tree.find_clades(order="level"):
+        for child in parent.clades:
+            accuracy = clade_accuracy_cache[id(child)]
+            color = accuracy_to_color(accuracy)
+            x_values, y_values = circular_edge_points(
+                radius_by_clade[id(parent)],
+                angle_by_clade[id(parent)],
+                radius_by_clade[id(child)],
+                angle_by_clade[id(child)],
+            )
+            ax.plot(x_values, y_values, color=color, linewidth=0.55, alpha=0.88)
+
+    cmap = mcolors.LinearSegmentedColormap.from_list(
+        "prediction_accuracy",
+        [LOW_COLOR, MID_COLOR, HIGH_COLOR],
+    )
+    sm = ScalarMappable(cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=1))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.026, pad=0.04)
+    cbar.set_label("Prediction\naccuracy", rotation=0, labelpad=28)
+    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+
+    ax.set_title("XGB residual-learning accuracy across test-set species", fontsize=14, pad=18)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_xlim(-500, 500)
+    ax.set_ylim(-500, 500)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
@@ -419,6 +481,12 @@ def main() -> None:
         default=Path("results/plots/xgb_residual_phylogeny_accuracy.html"),
         help="Output standalone interactive HTML with hover tooltips.",
     )
+    parser.add_argument(
+        "--png-output",
+        type=Path,
+        default=Path("results/plots/xgb_residual_phylogeny_accuracy.png"),
+        help="Output static PNG of the circular accuracy tree.",
+    )
     args = parser.parse_args()
 
     tree_path = resolve_path(root, args.tree)
@@ -426,9 +494,11 @@ def main() -> None:
     output_path = resolve_path(root, args.output)
     species_output_path = resolve_path(root, args.species_output)
     html_output_path = resolve_path(root, args.html_output)
+    png_output_path = resolve_path(root, args.png_output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     species_output_path.parent.mkdir(parents=True, exist_ok=True)
     html_output_path.parent.mkdir(parents=True, exist_ok=True)
+    png_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     tip_accuracy = load_tip_accuracy(predictions_path)
     tip_records = load_tip_records(predictions_path)
@@ -436,6 +506,7 @@ def main() -> None:
     matched_tips = prune_to_predicted_tips(tree, tip_accuracy)
     write_species_accuracy_table(tree, tip_accuracy, species_output_path)
     write_interactive_html(tree, tip_accuracy, tip_records, html_output_path)
+    write_static_png(tree, tip_accuracy, png_output_path)
     phylogeny = PhyloXML.Phylogeny.from_tree(tree)
     annotate_clade(phylogeny.root, tip_accuracy)
 
@@ -444,6 +515,7 @@ def main() -> None:
     print(f"Saved PhyloXML: {output_path}")
     print(f"Saved species accuracy table: {species_output_path}")
     print(f"Saved interactive HTML: {html_output_path}")
+    print(f"Saved static PNG: {png_output_path}")
 
 
 if __name__ == "__main__":

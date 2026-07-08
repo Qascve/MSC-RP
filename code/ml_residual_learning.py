@@ -22,6 +22,29 @@ MODEL_NAMES = ["random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["log_mass"]
 TAXONOMY_MODEL_FEATURES = ["Genus", "species"]
 TAXONOMY_METADATA_COLUMNS = ["class", "order", "family", "Genus", "species"]
+MIN_SPECIES_PER_CLASS = 2
+KEEP_CLASSES = {
+    "Teleostei",
+    "Mammalia",
+    "Insecta",
+    "Reptilia",
+    "Amphibia",
+    "Malacostraca",
+    "Aves",
+    "Cephalaspidomorphi",
+    "Arachnida",
+    "Chondrichthyes",
+    "Chondrostei",
+    "Maxillopoda",
+    "Cephalopoda",
+    "Branchiopoda",
+    "Dipnotetrapodomorpha",
+    "Myxini",
+    "Cladistei",
+    "Hydrozoa",
+    "Sagittoidea",
+    "Scyphozoa",
+}
 GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "all": None,
     "Teleostei": "Teleostei",
@@ -118,6 +141,16 @@ def load_full_data(path: Path) -> pd.DataFrame:
     required = ["taxon_name", *TREE_MODEL_FEATURES, TARGET, LOG_TARGET]
     required = list(dict.fromkeys(required))
     out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=required).copy()
+    out = out[out["class"].isin(KEEP_CLASSES)].copy()
+    if out.empty:
+        raise ValueError("No rows left after applying the retained class filter.")
+    species_counts = out.groupby("class")["taxon_name"].nunique()
+    keep_classes_with_enough_species = species_counts[species_counts >= MIN_SPECIES_PER_CLASS].index
+    out = out[out["class"].isin(keep_classes_with_enough_species)].copy()
+    if out.empty:
+        raise ValueError(
+            f"No rows left after removing classes with fewer than {MIN_SPECIES_PER_CLASS} species."
+        )
     return out.reset_index(drop=True)
 
 
@@ -411,6 +444,12 @@ def save_shap_outputs(
     models: dict[str, object],
     shap_inputs: dict[str, pd.DataFrame],
 ) -> None:
+    def save_current_figure(path: Path) -> None:
+        try:
+            plt.savefig(path, dpi=160)
+        except OSError as exc:
+            print(f"Warning: could not save SHAP plot {path}: {exc}")
+
     shap_candidates = ["random_forest", "xgboost"]
     best = (
         metrics_df[metrics_df["model"].isin(shap_candidates)]
@@ -434,13 +473,13 @@ def save_shap_outputs(
     plt.figure(figsize=(9, 6))
     shap.summary_plot(shap_values, X_test_res, show=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "shap_summary_beeswarm.png", dpi=160)
+    save_current_figure(out_dir / "shap_summary_beeswarm.png")
     plt.close()
 
     plt.figure(figsize=(9, 6))
     shap.summary_plot(shap_values, X_test_res, plot_type="bar", show=False)
     plt.tight_layout()
-    plt.savefig(out_dir / "shap_summary_bar.png", dpi=160)
+    save_current_figure(out_dir / "shap_summary_bar.png")
     plt.close()
 
 
