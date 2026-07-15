@@ -4,7 +4,7 @@ parse_args <- function() {
   args <- commandArgs(trailingOnly = TRUE)
   values <- list(
     tree = "data/phylogeny/unique_taxon_names.nwk",
-    predictions = "results/benchmark/all/f_1/benchmark_predictions_test.csv",
+    predictions = "results/benchmark/all/test/benchmark_predictions_test.csv",
     output_dir = "results/plots"
   )
   i <- 1

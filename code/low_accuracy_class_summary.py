@@ -87,7 +87,7 @@ def main() -> None:
     parser.add_argument(
         "--predictions",
         type=Path,
-        default=Path("results/benchmark/all/f_1/benchmark_predictions_test.csv"),
+        default=Path("results/benchmark/all/test/benchmark_predictions_test.csv"),
         help="Prediction CSV with taxon_name, class, y_true, and xgboost columns.",
     )
     parser.add_argument(
