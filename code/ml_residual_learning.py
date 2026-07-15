@@ -22,7 +22,7 @@ TARGET = "BMR"
 LOG_TARGET = "log_BMR"
 MODEL_NAMES = ["random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["log_mass"]
-TAXONOMY_MODEL_FEATURES = ["Genus", "species"]
+TAXONOMY_MODEL_FEATURES = ["class", "order", "family"]
 TAXONOMY_METADATA_COLUMNS = ["class", "order", "family", "Genus", "species"]
 KEEP_CLASSES = {
     "Teleostei",
@@ -58,6 +58,8 @@ GROUP_CLASS_FILTERS: dict[str, str | None] = {
 FOLD_DIR_NAMES = {
     "fold1": "f_1",
     "fold2": "f_2",
+    "fold3": "f_3",
+    "fold4": "f_4",
     "test": "test",
 }
 TREE_MODEL_FEATURES = [
@@ -71,9 +73,9 @@ TREE_MODEL_FEATURES = [
     "pc5",
 ]
 
-EARLY_STOPPING_ROUNDS = 10
+EARLY_STOPPING_ROUNDS = 30
 XGB_MAX_ESTIMATORS = 1000
-INNER_VAL_FRAC = 0.2
+N_HP_TRIALS = 50
 RF_FIXED_PARAMS = {
     "n_estimators": 600,
     "max_depth": 4,
@@ -81,7 +83,7 @@ RF_FIXED_PARAMS = {
     "max_features": 1.0,
 }
 XGB_PARAM_GRID = {
-    "max_depth": [4, 6, 8, 10],
+    "max_depth": [4, 6, 8],
     "learning_rate": [0.01, 0.05, 0.08],
     "subsample": [0.6, 0.7],
     "colsample_bytree": [0.6, 0.7],
@@ -100,7 +102,6 @@ def find_root(marker: str = ".gitignore") -> Path:
 
 
 def load_split_data(path: Path) -> pd.DataFrame:
-    """Load a fixed train/test CSV produced by split_train_test_bmr.py."""
     df = pd.read_csv(path)
     keep_cols = list(
         dict.fromkeys(
@@ -139,7 +140,7 @@ def discover_fold_splits(split_dir: Path, folds: list[str] | None = None) -> lis
     Discover fixed fold CSVs under split_dir.
     Prefers fold1/, fold2/, test/; falls back to top-level train.csv/test.csv as fold1.
     """
-    wanted = folds if folds else ["fold1", "fold2", "test"]
+    wanted = folds if folds else ["fold1", "fold2", "fold3", "fold4", "test"]
     found: list[tuple[str, Path, Path]] = []
     for name in wanted:
         train_path = split_dir / name / "train.csv"
@@ -157,7 +158,7 @@ def discover_fold_splits(split_dir: Path, folds: list[str] | None = None) -> lis
 
     raise FileNotFoundError(
         f"No fixed split CSVs found under {split_dir}. "
-        "Expected fold1/, fold2/, and test/ with train.csv & test.csv. "
+        "Expected fold1/..fold4/ and test/ with train.csv & test.csv. "
         "Run: python code/split_train_test_bmr.py"
     )
 
@@ -172,26 +173,6 @@ def assert_no_species_leakage(train_df: pd.DataFrame, test_df: pd.DataFrame) -> 
 
 def fit_alpha_three_quarter(log_mass: np.ndarray, log_bmr: np.ndarray) -> float:
     return float(np.mean(log_bmr - 0.75 * log_mass))
-
-
-def species_block_train_val_split(
-    train_df: pd.DataFrame, val_frac: float, random_state: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Hold out a fraction of training species for inner validation (no row leakage)."""
-    species = train_df["taxon_name"].astype(str).unique()
-    if len(species) < 3:
-        raise RuntimeError("Need at least 3 training species for inner val split.")
-    rng = np.random.default_rng(random_state)
-    order = rng.permutation(species)
-    n_val = max(1, int(round(len(order) * val_frac)))
-    n_val = min(n_val, len(order) - 1)
-    val_species = set(order[:n_val].tolist())
-    is_val = train_df["taxon_name"].astype(str).isin(val_species)
-    fit_df = train_df.loc[~is_val].reset_index(drop=True)
-    val_df = train_df.loc[is_val].reset_index(drop=True)
-    if fit_df.empty or val_df.empty:
-        raise RuntimeError("Inner species-block split produced an empty fit/val set.")
-    return fit_df, val_df
 
 
 def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
@@ -220,6 +201,21 @@ def _cartesian_param_dicts(grid: dict) -> list[dict]:
     for key in keys:
         combos = [{**base, key: val} for base in combos for val in grid[key]]
     return combos
+
+
+def draw_unique_param_sets(grid: dict, n_trials: int, random_state: int) -> list[dict]:
+    """Randomly draw unique parameter combinations without replacement."""
+    all_combinations = _cartesian_param_dicts(grid)
+    total = len(all_combinations)
+    if len({_params_key(params) for params in all_combinations}) != total:
+        raise ValueError("XGB_PARAM_GRID contains duplicate parameter combinations.")
+    if not 1 <= n_trials <= total:
+        raise ValueError(
+            f"n_hp_trials must be between 1 and {total}; got {n_trials}."
+        )
+    rng = np.random.default_rng(random_state)
+    selected = rng.choice(total, size=n_trials, replace=False)
+    return [all_combinations[int(i)] for i in selected]
 
 
 def encode_train_frame(
@@ -277,27 +273,62 @@ def fit_xgb_with_early_stopping(
 
 
 def tune_models_on_train(
-    train_df: pd.DataFrame,
+    cv_splits: list[tuple[str, pd.DataFrame, pd.DataFrame]],
+    full_train_df: pd.DataFrame,
     random_state: int,
     balance_classes: bool,
+    n_hp_trials: int,
 ) -> dict:
-    """Exhaustively tune XGB; train RF once with fixed parameters."""
-    fit_df, val_df = species_block_train_val_split(
-        train_df, val_frac=INNER_VAL_FRAC, random_state=random_state
-    )
-    alpha = fit_alpha_three_quarter(
-        train_df[POWER_LAW_FEATURES[0]].to_numpy(),
-        train_df[LOG_TARGET].to_numpy(dtype=float),
-    )
+    """
+    Tune XGB by fixed four-fold species-block CV, then retrain RF and XGB on
+    the complete 80% development set.
 
-    # Feature columns from the fit split (val may have unseen categories → zeros).
-    X_fit, residual_fit, _ = encode_train_frame(fit_df, alpha)
-    feature_columns = list(X_fit.columns)
-    X_val, residual_val, _ = encode_train_frame(val_df, alpha, feature_columns)
-    sw_fit = make_class_balanced_sample_weight(fit_df) if balance_classes else None
-    sw_val = make_class_balanced_sample_weight(val_df) if balance_classes else None
+    Each CV baseline alpha is fitted only on that fold's three training
+    partitions. Validation targets therefore never contribute to alpha.
+    """
+    if len(cv_splits) != 4:
+        raise ValueError(f"Expected exactly four CV splits, got {len(cv_splits)}.")
 
-    xgb_param_sets = _cartesian_param_dicts(XGB_PARAM_GRID)
+    prepared_splits: list[dict] = []
+    for fold_tag, fit_df, val_df in cv_splits:
+        assert_no_species_leakage(fit_df, val_df)
+        alpha_inner = fit_alpha_three_quarter(
+            fit_df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float),
+            fit_df[LOG_TARGET].to_numpy(dtype=float),
+        )
+        X_fit, residual_fit, _ = encode_train_frame(fit_df, alpha_inner)
+        feature_columns_inner = list(X_fit.columns)
+        X_val, residual_val, _ = encode_train_frame(
+            val_df, alpha_inner, feature_columns_inner
+        )
+        prepared_splits.append(
+            {
+                "fold_tag": fold_tag,
+                "X_fit": X_fit,
+                "residual_fit": residual_fit,
+                "X_val": X_val,
+                "residual_val": residual_val,
+                "sw_fit": (
+                    make_class_balanced_sample_weight(fit_df)
+                    if balance_classes
+                    else None
+                ),
+                "sw_val": (
+                    make_class_balanced_sample_weight(val_df)
+                    if balance_classes
+                    else None
+                ),
+                "val_species": int(val_df["taxon_name"].nunique()),
+                "val_rows": int(len(val_df)),
+                "alpha_inner": float(alpha_inner),
+            }
+        )
+
+    all_combinations = _cartesian_param_dicts(XGB_PARAM_GRID)
+    total_combinations = len(all_combinations)
+    xgb_param_sets = draw_unique_param_sets(
+        XGB_PARAM_GRID, n_trials=n_hp_trials, random_state=random_state
+    )
     n_combinations = len(xgb_param_sets)
     if n_combinations == 0:
         raise ValueError("XGB_PARAM_GRID produced no combinations.")
@@ -307,33 +338,45 @@ def tune_models_on_train(
 
     xgb_trials: list[dict] = []
     best_xgb: dict | None = None
-    best_xgb_hist: list[float] = []
+    best_xgb_histories: list[list[float]] = []
 
     print(
-        f"  XGB exhaustive grid search: {n_combinations} combinations, "
-        f"inner species val={val_df['taxon_name'].nunique()} species / {len(val_df)} rows",
+        f"  XGB random four-fold CV: {n_combinations} unique combinations "
+        f"drawn from {total_combinations} x {len(prepared_splits)} folds",
         flush=True,
     )
     for trial, xgb_params in enumerate(xgb_param_sets):
-        _, xgb_n, xgb_score, xgb_hist = fit_xgb_with_early_stopping(
-            X_fit,
-            residual_fit,
-            X_val,
-            residual_val,
-            xgb_params,
-            sw_fit,
-            sw_val,
-            random_state,
-        )
-        xgb_row = {**xgb_params, "n_estimators": xgb_n, "val_rmse": xgb_score, "trial": trial}
+        fold_scores: list[float] = []
+        fold_estimators: list[int] = []
+        fold_histories: list[list[float]] = []
+        xgb_row = {**xgb_params, "trial": trial}
+        for fold_idx, split in enumerate(prepared_splits):
+            _, xgb_n, xgb_score, xgb_hist = fit_xgb_with_early_stopping(
+                split["X_fit"],
+                split["residual_fit"],
+                split["X_val"],
+                split["residual_val"],
+                xgb_params,
+                split["sw_fit"],
+                split["sw_val"],
+                random_state + fold_idx,
+            )
+            fold_scores.append(xgb_score)
+            fold_estimators.append(xgb_n)
+            fold_histories.append(xgb_hist)
+            xgb_row[f"{split['fold_tag']}_val_rmse"] = xgb_score
+            xgb_row[f"{split['fold_tag']}_n_estimators"] = xgb_n
+        xgb_row["cv_mean_rmse"] = float(np.mean(fold_scores))
+        xgb_row["cv_std_rmse"] = float(np.std(fold_scores, ddof=0))
+        xgb_row["n_estimators"] = max(1, int(round(np.mean(fold_estimators))))
         xgb_trials.append(xgb_row)
-        if best_xgb is None or xgb_score < best_xgb["val_rmse"]:
+        if best_xgb is None or xgb_row["cv_mean_rmse"] < best_xgb["cv_mean_rmse"]:
             best_xgb = dict(xgb_row)
-            best_xgb_hist = list(xgb_hist)
+            best_xgb_histories = [list(hist) for hist in fold_histories]
         if (trial + 1) % 10 == 0 or trial == 0:
             print(
                 f"    combination {trial + 1}/{n_combinations}: "
-                f"best_so_far val_rmse={best_xgb['val_rmse']:.4f} "
+                f"best_so_far cv_mean_rmse={best_xgb['cv_mean_rmse']:.4f} "
                 f"(trial={int(best_xgb['trial']) + 1})",
                 flush=True,
             )
@@ -342,12 +385,28 @@ def tune_models_on_train(
 
     # XGB uses the winning trial; RF uses one fixed configuration without tuning.
     xgb_n_final = int(best_xgb["n_estimators"])
-    xgb_hist = list(best_xgb_hist)
+    max_history = max((len(hist) for hist in best_xgb_histories), default=0)
+    history_matrix = np.full((len(best_xgb_histories), max_history), np.nan)
+    for row_idx, hist in enumerate(best_xgb_histories):
+        history_matrix[row_idx, : len(hist)] = hist
+    xgb_hist = (
+        np.nanmean(history_matrix, axis=0).astype(float).tolist()
+        if max_history
+        else []
+    )
 
-    # Full-train feature space (may include categories only in former val species).
-    X_all, residual_all, _ = encode_train_frame(train_df, alpha)
+    # Re-estimate alpha only after selection, now using all four development folds.
+    alpha_full = fit_alpha_three_quarter(
+        full_train_df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float),
+        full_train_df[LOG_TARGET].to_numpy(dtype=float),
+    )
+    X_all, residual_all, _ = encode_train_frame(full_train_df, alpha_full)
     feature_columns = list(X_all.columns)
-    sw_all = make_class_balanced_sample_weight(train_df) if balance_classes else None
+    sw_all = (
+        make_class_balanced_sample_weight(full_train_df)
+        if balance_classes
+        else None
+    )
 
     rf_full = RandomForestRegressor(
         **RF_FIXED_PARAMS,
@@ -377,17 +436,19 @@ def tune_models_on_train(
         flush=True,
     )
     print(
-        f"  Best XGB trial={best_xgb['trial']} val_rmse={best_xgb['val_rmse']:.4f} "
+        f"  Best XGB trial={int(best_xgb['trial']) + 1} "
+        f"cv_mean_rmse={best_xgb['cv_mean_rmse']:.4f} "
+        f"cv_std_rmse={best_xgb['cv_std_rmse']:.4f} "
         f"n_estimators={xgb_n_final} "
         f"params={{max_depth={best_xgb['max_depth']}, lr={best_xgb['learning_rate']}}}",
         flush=True,
     )
 
-    xgb_score = float(best_xgb["val_rmse"])
+    xgb_score = float(best_xgb["cv_mean_rmse"])
 
     return {
         "models": {"random_forest": rf_full, "xgboost": xgb_full},
-        "alpha": float(alpha),
+        "alpha": float(alpha_full),
         "feature_columns": feature_columns,
         "best_params": {
             "random_forest": {
@@ -403,7 +464,8 @@ def tune_models_on_train(
                 "reg_lambda": float(best_xgb["reg_lambda"]),
                 "min_child_weight": int(best_xgb["min_child_weight"]),
                 "n_estimators": xgb_n_final,
-                "search_val_rmse": xgb_score,
+                "cv_mean_rmse": xgb_score,
+                "cv_std_rmse": float(best_xgb["cv_std_rmse"]),
             },
         },
         "search_trials": {
@@ -412,8 +474,17 @@ def tune_models_on_train(
         "loss_curves": {
             "xgboost": xgb_hist,
         },
-        "inner_val_species": int(val_df["taxon_name"].nunique()),
-        "inner_val_rows": int(len(val_df)),
+        "inner_val_species": int(sum(s["val_species"] for s in prepared_splits)),
+        "inner_val_rows": int(sum(s["val_rows"] for s in prepared_splits)),
+        "cv_folds": [
+            {
+                "fold": split["fold_tag"],
+                "val_species": split["val_species"],
+                "val_rows": split["val_rows"],
+                "alpha_inner": split["alpha_inner"],
+            }
+            for split in prepared_splits
+        ],
         "fold_tag": None,
     }
 
@@ -434,6 +505,7 @@ def save_model_bundle(bundle: dict, model_dir: Path) -> Path:
         "best_params": bundle["best_params"],
         "inner_val_species": bundle["inner_val_species"],
         "inner_val_rows": bundle["inner_val_rows"],
+        "cv_folds": bundle.get("cv_folds", []),
         "model_features": TREE_MODEL_FEATURES,
         "fold_tag": bundle.get("fold_tag"),
     }
@@ -465,15 +537,15 @@ def write_hp_search_trials_csv(
     benchmark_dir: Path,
     fold_tag: str,
     bundle: dict,
-    reset: bool = False,
+    model_dir: Path | None = None,
 ) -> Path:
     """
-    Write/append all exhaustive XGB combinations + inner-val RMSE.
+    Write/append all sampled unique XGB combinations + four-fold CV RMSE.
     RF is omitted because it uses fixed parameters and is not tuned.
 
-    Per-fold files are authoritative. If a CSV is open and locked on Windows,
-    write an ``*_unlocked.csv`` fallback and continue instead of losing the
-    completed grid search.
+    Fixed filenames are overwritten on every run. If a CSV is open and locked
+    on Windows, write an ``*_unlocked.csv`` fallback and continue instead of
+    losing the completed search.
     """
     def write_with_fallback(df: pd.DataFrame, path: Path) -> Path:
         try:
@@ -501,37 +573,18 @@ def write_hp_search_trials_csv(
             rows.append(row)
     new_df = pd.DataFrame(rows)
 
-    # Save authoritative per-fold outputs before touching the combined CSV.
-    fold_path = write_with_fallback(
-        new_df, benchmark_dir / f"hp_search_trials_{fold_tag}.csv"
-    )
+    actual_out_path = write_with_fallback(new_df, out_path)
     best_df = new_df.loc[new_df["is_best"] == 1].copy()
     best_path = write_with_fallback(
-        best_df, benchmark_dir / f"xgb_best_params_{fold_tag}.csv"
+        best_df, benchmark_dir / "xgb_best_params.csv"
     )
 
-    model_dir = benchmark_dir / "all" / fold_tag / "models"
+    model_dir = model_dir or benchmark_dir / "all" / fold_tag / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
     write_with_fallback(best_df, model_dir / "xgb_best_params.csv")
 
-    # The combined CSV is convenient but non-authoritative.
-    if reset or not out_path.exists():
-        combined_df = new_df
-    else:
-        try:
-            old_df = pd.read_csv(out_path)
-            keep = (
-                old_df[old_df["fold"].astype(str) != str(fold_tag)]
-                if "fold" in old_df.columns
-                else old_df.iloc[0:0]
-            )
-            combined_df = pd.concat([keep, new_df], ignore_index=True)
-        except PermissionError:
-            combined_df = new_df
-    actual_out_path = write_with_fallback(combined_df, out_path)
-
     print(
-        f"  Wrote XGB exhaustive search ({len(new_df)} rows) -> {fold_path}",
+        f"  Wrote XGB random search ({len(new_df)} rows) -> {actual_out_path}",
         flush=True,
     )
     print(
@@ -539,76 +592,6 @@ def write_hp_search_trials_csv(
         flush=True,
     )
     return actual_out_path
-
-
-def fold_model_eval_rmse(
-    benchmark_dir: Path, fold_tag: str, model_name: str
-) -> float:
-    """Return this model family's outer-fold evaluation RMSE."""
-    metrics_path = benchmark_dir / "all" / fold_tag / "benchmark_metrics.csv"
-    if metrics_path.exists():
-        metrics = pd.read_csv(metrics_path)
-        hit = metrics.loc[metrics["model"] == model_name, "rmse"]
-        if not hit.empty and np.isfinite(hit.iloc[0]):
-            return float(hit.iloc[0])
-    raise FileNotFoundError(
-        f"Missing {model_name} fold metric in {metrics_path}; rerun fold1/fold2."
-    )
-
-
-def select_best_models_from_cv_folds(
-    benchmark_dir: Path, source_folds: list[str] | None = None
-) -> dict[str, dict]:
-    """
-    Independently pick the better saved RF and XGB from f_1/f_2.
-    The held-out test set is never used for selection.
-    """
-    source_folds = source_folds or ["f_1", "f_2"]
-    selected: dict[str, dict] = {}
-    for model_name in MODEL_NAMES:
-        best: dict | None = None
-        for fold_tag in source_folds:
-            model_dir = benchmark_dir / "all" / fold_tag / "models"
-            model_path = model_dir / f"{model_name}.joblib"
-            if not model_path.exists():
-                raise FileNotFoundError(
-                    f"Missing saved {model_name} for {fold_tag}: {model_path}. "
-                    "Rerun fold1/fold2 with the updated script."
-                )
-            score = fold_model_eval_rmse(benchmark_dir, fold_tag, model_name)
-            if best is None or score < best["score"]:
-                best = {
-                    "fold": fold_tag,
-                    "model_name": model_name,
-                    "score": score,
-                    "model_dir": model_dir,
-                }
-        assert best is not None
-        selected[model_name] = best
-        print(
-            f"  test uses {model_name} from {best['fold']} "
-            f"(fold eval RMSE={best['score']:.4f})",
-            flush=True,
-        )
-    return selected
-
-
-def save_test_model_selection(
-    selection: dict[str, dict], model_dir: Path
-) -> Path:
-    """Record the independently selected RF and XGB source folds."""
-    model_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        name: {
-            "source_fold": info["fold"],
-            "source_model_dir": str(info["model_dir"]),
-            "selection_rmse": info["score"],
-        }
-        for name, info in selection.items()
-    }
-    out = model_dir / "selection.json"
-    out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    return out
 
 
 def load_model_bundle(model_dir: Path) -> dict:
@@ -632,35 +615,6 @@ def load_model_bundle(model_dir: Path) -> dict:
         "best_params": meta.get("best_params", {}),
         "model_features": list(meta.get("model_features", TREE_MODEL_FEATURES)),
     }
-
-
-def load_selected_models(
-    selection: dict[str, dict],
-) -> dict[str, dict]:
-    """Load RF/XGB from their independently selected source folds."""
-    return {
-        name: load_model_bundle(info["model_dir"])
-        for name, info in selection.items()
-    }
-
-
-def predict_selected_models(
-    selected_bundles: dict[str, dict], df: pd.DataFrame
-) -> tuple[dict[str, np.ndarray], dict[str, pd.DataFrame], dict[str, object]]:
-    preds: dict[str, np.ndarray] = {}
-    shap_inputs: dict[str, pd.DataFrame] = {}
-    models: dict[str, object] = {}
-    for name in MODEL_NAMES:
-        bundle = selected_bundles[name]
-        single_bundle = {
-            **bundle,
-            "models": {name: bundle["models"][name]},
-        }
-        p, x = predict_log_bmr(single_bundle, df)
-        preds[name] = p[name]
-        shap_inputs[name] = x[name]
-        models[name] = bundle["models"][name]
-    return preds, shap_inputs, models
 
 
 def predict_log_bmr(
@@ -1030,33 +984,41 @@ def evaluate_fold_predictions(
     return groups_done
 
 
-def run_one_fold_global(
-    train_df: pd.DataFrame,
+def run_four_fold_cv_global(
+    cv_splits: list[tuple[str, pd.DataFrame, pd.DataFrame]],
+    full_train_df: pd.DataFrame,
     test_df: pd.DataFrame,
-    fold_tag: str,
     out_dir: Path,
     random_state: int,
     balance_classes: bool,
-    reset_hp_log: bool = False,
+    n_hp_trials: int,
 ) -> list[str]:
     """
-    Train fixed-parameter RF plus tuned XGB, save/reload both, then evaluate.
+    Select XGB parameters by four-fold CV, retrain both models on all four
+    development folds, save/reload them, and evaluate once on held-out test.
     """
+    fold_tag = "test"
     model_dir = out_dir / "all" / fold_tag / "models"
 
-    print(f"  Tuning + training global models on {len(train_df)} train rows...", flush=True)
+    print(
+        f"  Four-fold CV on {len(full_train_df)} development rows; "
+        f"held-out test rows={len(test_df)}...",
+        flush=True,
+    )
     bundle = tune_models_on_train(
-        train_df=train_df,
+        cv_splits=cv_splits,
+        full_train_df=full_train_df,
         random_state=random_state,
         balance_classes=balance_classes,
+        n_hp_trials=n_hp_trials,
     )
     bundle["fold_tag"] = fold_tag
     save_model_bundle(bundle, model_dir)
     write_hp_search_trials_csv(
         benchmark_dir=out_dir,
-        fold_tag=fold_tag,
+        fold_tag="cv4",
         bundle=bundle,
-        reset=reset_hp_log,
+        model_dir=model_dir,
     )
 
     print("  Reloading RF and XGB from disk for evaluation...", flush=True)
@@ -1074,63 +1036,28 @@ def run_one_fold_global(
     )
 
 
-def run_test_with_best_cv_models(
-    test_df: pd.DataFrame,
-    out_dir: Path,
-    random_state: int,
-    source_folds: list[str] | None = None,
-) -> list[str]:
-    """
-    Held-out test: no HP search. Independently select the better f_1/f_2
-    RF and XGB models, then evaluate both on the 20% test set.
-    """
-    fold_tag = "test"
-    model_dir = out_dir / "all" / fold_tag / "models"
-    print("  Selecting best saved RF and XGB folds (no HP search on test)...", flush=True)
-    selection = select_best_models_from_cv_folds(out_dir, source_folds=source_folds)
-    save_test_model_selection(selection, model_dir)
-    selected_bundles = load_selected_models(selection)
-    preds, shap_inputs, models = predict_selected_models(selected_bundles, test_df)
-    return evaluate_fold_predictions(
-        fold_tag=fold_tag,
-        test_df=test_df,
-        preds=preds,
-        shap_inputs=shap_inputs,
-        models=models,
-        out_dir=out_dir,
-        model_dir=model_dir,
-        random_state=random_state,
-    )
-
-
 def main() -> None:
     print("Running ml_residual_learning.py")
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Train fixed-parameter RF and exhaustively tuned XGB residual models on "
-            "fold1/fold2, "
-            "save/reload both separately, then independently select the best RF and "
-            "XGB fold models for held-out test evaluation."
+            "Tune XGB with unique random grid combinations and fixed four-fold "
+            "species-block CV, retrain RF "
+            "and XGB on the complete 80% development set, then save/reload and "
+            "evaluate once on the held-out 20% test set."
         )
     )
     parser.add_argument(
         "--split-dir",
         type=Path,
         default=Path("data/splits"),
-        help="Directory containing fixed fold1/fold2/test train.csv and test.csv files.",
-    )
-    parser.add_argument(
-        "--folds",
-        nargs="+",
-        default=["fold1", "fold2", "test"],
-        help="Which fixed splits to run (default: fold1 fold2 test).",
+        help="Directory containing fixed fold1..fold4/test train.csv and test.csv files.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("results/benchmark"),
-        help="Output directory. Results are stored under <group>/f_1, f_2, and test.",
+        help="Output directory. Final results are stored under <group>/test.",
     )
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     args = parser.parse_args()
@@ -1138,62 +1065,80 @@ def main() -> None:
     split_dir = args.split_dir if args.split_dir.is_absolute() else root / args.split_dir
     out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    split_summary_path = split_dir / "class_species_block_split_summary.csv"
+    if split_summary_path.exists():
+        pd.read_csv(split_summary_path).to_csv(
+            out_dir / "class_species_block_split_summary.csv",
+            index=False,
+            encoding="utf-8",
+        )
 
-    fold_splits = discover_fold_splits(split_dir, folds=list(args.folds))
-    fold_tags_done: list[str] = []
-    groups_done: list[str] = []
-    hp_log_reset_done = False
+    required_names = ["fold1", "fold2", "fold3", "fold4", "test"]
+    discovered = {
+        name: (train_path, eval_path)
+        for name, train_path, eval_path in discover_fold_splits(
+            split_dir, folds=required_names
+        )
+    }
+    missing = [name for name in required_names if name not in discovered]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing fixed splits: {missing}. Run python code/split_train_test_bmr.py first."
+        )
 
-    for fold_name, train_path, test_path in fold_splits:
-        fold_tag = FOLD_DIR_NAMES.get(fold_name, fold_name)
-        fold_tags_done.append(fold_tag)
-        print(f"\n=== {fold_tag} ({fold_name}): {train_path} | {test_path} ===", flush=True)
-        test_df_all = load_split_data(test_path)
+    full_train_path, heldout_path = discovered["test"]
+    full_train_df = load_split_data(full_train_path)
+    heldout_df = load_split_data(heldout_path)
+    assert_no_species_leakage(full_train_df, heldout_df)
 
-        if fold_tag == "test" or fold_name == "test":
-            # Optional leakage check against the 80% train if present.
-            if train_path.exists():
-                train_df = load_split_data(train_path)
-                assert_no_species_leakage(train_df, test_df_all)
-            done = run_test_with_best_cv_models(
-                test_df=test_df_all,
-                out_dir=out_dir,
-                random_state=args.random_state,
-                source_folds=["f_1", "f_2"],
-            )
-        else:
-            train_df = load_split_data(train_path)
-            assert_no_species_leakage(train_df, test_df_all)
-            reset_hp_log = not hp_log_reset_done
-            done = run_one_fold_global(
-                train_df=train_df,
-                test_df=test_df_all,
-                fold_tag=fold_tag,
-                out_dir=out_dir,
-                random_state=args.random_state,
-                balance_classes=True,
-                reset_hp_log=reset_hp_log,
-            )
-            hp_log_reset_done = True
+    cv_splits: list[tuple[str, pd.DataFrame, pd.DataFrame]] = []
+    validation_species: list[set[str]] = []
+    for fold_name in required_names[:4]:
+        train_path, val_path = discovered[fold_name]
+        train_df = load_split_data(train_path)
+        val_df = load_split_data(val_path)
+        assert_no_species_leakage(train_df, val_df)
+        assert_no_species_leakage(train_df, heldout_df)
+        fold_tag = FOLD_DIR_NAMES[fold_name]
+        cv_splits.append((fold_tag, train_df, val_df))
+        validation_species.append(set(val_df["taxon_name"].astype(str)))
+        print(
+            f"  Loaded {fold_tag}: train={len(train_df)} rows, "
+            f"validation={len(val_df)} rows",
+            flush=True,
+        )
 
-        for g in done:
-            if g not in groups_done:
-                groups_done.append(g)
+    for i, species_i in enumerate(validation_species):
+        for species_j in validation_species[i + 1 :]:
+            if species_i.intersection(species_j):
+                raise RuntimeError("Species leakage detected between CV validation folds.")
+    cv_species_union = set().union(*validation_species)
+    full_train_species = set(full_train_df["taxon_name"].astype(str))
+    if cv_species_union != full_train_species:
+        raise RuntimeError(
+            "The union of fold1..fold4 validation species does not equal test/train species."
+        )
 
-    if fold_tags_done:
-        for group_name in groups_done:
-            write_group_species_accuracy(
-                group_dir=out_dir / group_name,
-                fold_tags=fold_tags_done,
-            )
-    else:
-        print("Skip species accuracy CSV: no evaluation splits completed.")
+    groups_done = run_four_fold_cv_global(
+        cv_splits=cv_splits,
+        full_train_df=full_train_df,
+        test_df=heldout_df,
+        out_dir=out_dir,
+        random_state=args.random_state,
+        balance_classes=True,
+        n_hp_trials=N_HP_TRIALS,
+    )
+    for group_name in groups_done:
+        write_group_species_accuracy(
+            group_dir=out_dir / group_name,
+            fold_tags=["test"],
+        )
 
     print(f"\nRead fixed splits from: {split_dir}")
-    print(f"Wrote fold results under: {out_dir}/<group>/f_1|f_2|test/")
-    print(f"Global models under: {out_dir}/all/<fold>/models/")
-    print(f"Exhaustive XGB search log: {out_dir}/hp_search_trials.csv")
-    print(f"Best XGB params: {out_dir}/xgb_best_params_f_1.csv and xgb_best_params_f_2.csv")
+    print(f"Wrote held-out test results under: {out_dir}/<group>/test/")
+    print(f"Final 80%-trained models under: {out_dir}/all/test/models/")
+    print(f"Random XGB search log: {out_dir}/hp_search_trials.csv")
+    print(f"Best XGB params: {out_dir}/xgb_best_params.csv")
     print(f"Wrote species accuracy under: {out_dir}/<group>/species_accuracy.csv")
 
 

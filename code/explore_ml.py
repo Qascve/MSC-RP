@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-explore_ml.py — RF/XGB under M0–M4 feature settings, aligned with ml_residual_learning.py:
-
-- fold1 / fold2: species-block HP search + early stopping inside train,
-  save models, reload, evaluate on that fold's held-out set
-- test: no HP search; for each model slot load the better of f_1/f_2
-- write per-split metrics/predictions under results/explore/{f_1,f_2,test}/
-"""
+"""Train RF/XGB M0–M4 models on development data and evaluate on test only."""
 from __future__ import annotations
 
 import argparse
@@ -28,7 +21,6 @@ TEMP_COL = "temperature"
 CLADE_COL = "class"
 K_BOLTZMANN_EV_PER_K = 8.617e-5
 LOG_TARGET = "log_BMR"
-FOLD_DIR_NAMES = {"fold1": "f_1", "fold2": "f_2", "test": "test"}
 SPEC_NAMES = ("m0", "m1", "m2", "m3", "m4")
 ALGO_NAMES = ("random_forest", "xgboost")
 
@@ -271,7 +263,7 @@ def model_key(algo: str, spec: str) -> str:
 def tune_shared_hyperparams(
     train_df: pd.DataFrame, random_state: int, n_trials: int
 ) -> dict:
-    """Species-block HP search on HP_TUNE_SPEC features; shared by all M0–M4."""
+    #Species-block HP search on HP_TUNE_SPEC features; shared by all M0–M4.
     fit_df, val_df = species_block_train_val_split(
         train_df, val_frac=INNER_VAL_FRAC, random_state=random_state
     )
@@ -567,83 +559,6 @@ def run_cv_fold(
     save_outputs(out_dir / fold_tag, test_df, y_true, preds, fold_tag)
 
 
-def select_best_models_from_cv(out_dir: Path, source_folds: list[str] | None = None) -> dict[str, dict]:
-    source_folds = source_folds or ["f_1", "f_2"]
-    # Collect all model names from first available fold
-    model_names: list[str] = []
-    for tag in source_folds:
-        meta_path = out_dir / tag / "models" / "meta.json"
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            model_names = list(meta["model_names"])
-            break
-    if not model_names:
-        raise FileNotFoundError(
-            f"No explore_ml models under {out_dir}/f_1|f_2/models. Run fold1/fold2 first."
-        )
-
-    selected: dict[str, dict] = {}
-    for name in model_names:
-        best: dict | None = None
-        for tag in source_folds:
-            metrics_path = out_dir / tag / "explore_ml_metrics.csv"
-            model_dir = out_dir / tag / "models"
-            if not metrics_path.exists() or not (model_dir / "meta.json").exists():
-                raise FileNotFoundError(f"Missing explore_ml artifacts for {tag}")
-            metrics = pd.read_csv(metrics_path)
-            hit = metrics.loc[metrics["model"] == name, "rmse"]
-            if hit.empty:
-                continue
-            score = float(hit.iloc[0])
-            if best is None or score < best["score"]:
-                best = {"fold": tag, "model_name": name, "score": score, "model_dir": model_dir}
-        if best is None:
-            raise RuntimeError(f"No fold metrics found for model {name}")
-        selected[name] = best
-        print(
-            f"  test uses {name} from {best['fold']} (fold RMSE={best['score']:.4f})",
-            flush=True,
-        )
-    return selected
-
-
-def run_test_from_cv(test_df: pd.DataFrame, out_dir: Path) -> None:
-    fold_tag = "test"
-    print("  Selecting best saved models from f_1/f_2 (no HP search on test)...", flush=True)
-    selection = select_best_models_from_cv(out_dir)
-    model_dir = out_dir / fold_tag / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "selection.json").write_text(
-        json.dumps(
-            {
-                name: {
-                    "source_fold": info["fold"],
-                    "selection_rmse": info["score"],
-                    "source_model_dir": str(info["model_dir"]),
-                }
-                for name, info in selection.items()
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    # Load each model from its winning fold (may differ by model).
-    preds: dict[str, np.ndarray] = {}
-    for name, info in selection.items():
-        bundle = load_model_bundle(info["model_dir"])
-        single = {
-            "models": {name: bundle["models"][name]},
-            "feature_columns": bundle["feature_columns"],
-            "model_features": bundle.get("model_features", MODEL_FEATURES),
-        }
-        preds[name] = predict_with_bundle(single, test_df)[name]
-
-    y_true = test_df[LOG_TARGET].to_numpy(dtype=float)
-    save_outputs(out_dir / fold_tag, test_df, y_true, preds, fold_tag)
-
-
 def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
@@ -700,7 +615,7 @@ def discover_fold_splits(split_dir: Path, folds: list[str]) -> list[tuple[str, P
             found.append((name, train_path, test_path))
     if not found:
         raise FileNotFoundError(
-            f"No fold splits found under {split_dir}. Expected fold1/, fold2/, and test/."
+            f"No requested split found under {split_dir}. Expected test/."
         )
     return found
 
@@ -709,12 +624,11 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "RF/XGB under M0–M4 with HP search + early stopping on fold1/fold2; "
-            "test uses best saved f_1/f_2 models (no HP search)."
+            "Tune RF/XGB M0–M4 inside the 80% development set, retrain on the "
+            "complete development set, and evaluate only on held-out test."
         )
     )
     parser.add_argument("--split-dir", type=Path, default=Path("data/splits"))
-    parser.add_argument("--folds", nargs="+", default=["fold1", "fold2", "test"])
     parser.add_argument("--output-dir", type=Path, default=Path("results/explore"))
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--n-hp-trials", type=int, default=N_HP_TRIALS)
@@ -724,38 +638,24 @@ def main() -> None:
     out_dir = _resolve_path(root, args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    fold_splits = discover_fold_splits(split_dir, list(args.folds))
-    fold_tags: list[str] = []
-    hp_reset_done = False
+    fold_splits = discover_fold_splits(split_dir, ["test"])
+    _, train_path, test_path = fold_splits[0]
+    train_df = add_mte_features(load_split_data(train_path))
+    test_df = add_mte_features(load_split_data(test_path))
+    assert_no_species_leakage(train_df, test_df)
 
-    for fold_name, train_path, test_path in fold_splits:
-        fold_tag = FOLD_DIR_NAMES.get(fold_name, fold_name)
-        fold_tags.append(fold_tag)
-        print(f"\n=== explore_ml {fold_tag} ({fold_name}) ===", flush=True)
-        test_df = add_mte_features(load_split_data(test_path))
-
-        if fold_tag == "test" or fold_name == "test":
-            if train_path.exists():
-                train_df = add_mte_features(load_split_data(train_path))
-                assert_no_species_leakage(train_df, test_df)
-            run_test_from_cv(test_df, out_dir)
-        else:
-            train_df = add_mte_features(load_split_data(train_path))
-            assert_no_species_leakage(train_df, test_df)
-            run_cv_fold(
-                train_df=train_df,
-                test_df=test_df,
-                fold_tag=fold_tag,
-                out_dir=out_dir,
-                random_state=args.random_state,
-                n_hp_trials=args.n_hp_trials,
-                reset_hp_log=not hp_reset_done,
-            )
-            hp_reset_done = True
-
-    if fold_tags:
-        write_explore_ml_species_accuracy(out_dir, fold_tags)
-    print(f"\nWrote explore_ml results under: {out_dir}/<f_1|f_2|test>/")
+    print("\n=== explore_ml test (direct development-train/test-eval) ===", flush=True)
+    run_cv_fold(
+        train_df=train_df,
+        test_df=test_df,
+        fold_tag="test",
+        out_dir=out_dir,
+        random_state=args.random_state,
+        n_hp_trials=args.n_hp_trials,
+        reset_hp_log=True,
+    )
+    write_explore_ml_species_accuracy(out_dir, ["test"])
+    print(f"\nWrote explore_ml test results under: {out_dir}/test/")
     print(f"HP search log: {out_dir}/explore_ml_hp_search_trials.csv")
 
 

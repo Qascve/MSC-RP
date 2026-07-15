@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,6 +39,23 @@ def find_root(marker: str = ".gitignore") -> Path:
 
 def _resolve_path(root: Path, path: Path) -> Path:
     return path if path.is_absolute() else root / path
+
+
+def run_python_dependency(
+    script_path: Path,
+    root: Path,
+    extra_args: list[str],
+    label: str,
+) -> None:
+    """Run a required pipeline script with visible output and fail fast."""
+    cmd = [sys.executable, str(script_path), *extra_args]
+    print(f"\n[{label}] Missing or stale results; running dependency...", flush=True)
+    completed = subprocess.run(cmd, cwd=root, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{label} dependency failed with exit code {completed.returncode}: "
+            f"{' '.join(cmd)}"
+        )
 
 
 def load_split_data(path: Path) -> pd.DataFrame:
@@ -834,7 +852,7 @@ def discover_fold_splits(split_dir: Path, folds: list[str]) -> list[tuple[str, P
             found.append((name, train_path, test_path))
     if not found:
         raise FileNotFoundError(
-            f"No fold splits found under {split_dir}. Expected fold1/, fold2/, and test/."
+            f"No requested splits found under {split_dir}. Expected test/."
         )
     return found
 
@@ -865,28 +883,27 @@ def write_explore_species_accuracy(out_dir: Path, fold_tags: list[str]) -> Path:
 
 def main() -> None:
     root = find_root()
-    fold_name_map = {"fold1": "f_1", "fold2": "f_2", "test": "test"}
+    fold_name_map = {"test": "test"}
     parser = argparse.ArgumentParser(
         description=(
-            "Fit linear/phylo M0-M4 separately on fold1/fold2/test, "
-            "merge latest explore_ml + residual-learning predictions, "
-            "and write per-split plus by-fold summary reports."
+            "Fit linear/phylo M0-M4 on the held-out test split, merge the latest "
+            "test-only explore_ml and residual-learning predictions, and write "
+            "final test reports."
         )
     )
     parser.add_argument("--split-dir", type=Path, default=Path("data/splits"))
-    parser.add_argument("--folds", nargs="+", default=["fold1", "fold2", "test"])
     parser.add_argument("--output-dir", type=Path, default=Path("results/explore"))
     parser.add_argument(
         "--benchmark-predictions-dir",
         type=Path,
         default=Path("results/explore"),
-        help="Directory with f_*/explore_ml_predictions_test.csv from explore_ml.py.",
+        help="Directory with test/explore_ml_predictions_test.csv from explore_ml.py.",
     )
     parser.add_argument(
         "--residual-learning-dir",
         type=Path,
         default=Path("results/benchmark/all"),
-        help="Directory with f_*/benchmark_predictions_test.csv from ml_residual_learning.py.",
+        help="Directory with test/benchmark_predictions_test.csv from ml_residual_learning.py.",
     )
     parser.add_argument(
         "--phylo-tree",
@@ -900,7 +917,7 @@ def main() -> None:
     split_dir = _resolve_path(root, args.split_dir)
     out_dir = _resolve_path(root, args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fold_splits = discover_fold_splits(split_dir, list(args.folds))
+    fold_splits = discover_fold_splits(split_dir, ["test"])
     fold_tags: list[str] = []
 
     for fold_name, train_path, test_path in fold_splits:
@@ -925,34 +942,62 @@ def main() -> None:
         train_df = add_mte_features(load_split_data(train_path))
         test_df = add_mte_features(load_split_data(test_path))
 
-        benchmark_predictions: dict[str, np.ndarray] = {}
+        benchmark_predictions: dict[str, np.ndarray] | None = None
         if ml_pred_path.exists():
             try:
                 benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df)
-                print(
-                    f"[{fold_tag}] Loaded explore_ml predictions: "
-                    f"{len(benchmark_predictions)} models from {ml_pred_path}"
+            except (ValueError, KeyError) as exc:
+                print(f"[{fold_tag}] Existing explore_ml predictions are stale: {exc}")
+        if benchmark_predictions is None:
+            ml_output_dir = _resolve_path(root, args.benchmark_predictions_dir)
+            run_python_dependency(
+                script_path=root / "code" / "explore_ml.py",
+                root=root,
+                extra_args=[
+                    "--split-dir",
+                    str(split_dir),
+                    "--output-dir",
+                    str(ml_output_dir),
+                ],
+                label="explore_ml",
+            )
+            benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df)
+        print(
+            f"[{fold_tag}] Loaded explore_ml predictions: "
+            f"{len(benchmark_predictions)} models from {ml_pred_path}"
+        )
+
+        residual_learning_predictions: dict[str, np.ndarray] | None = None
+        if residual_pred_path.exists():
+            try:
+                residual_learning_predictions = load_residual_learning_predictions(
+                    residual_pred_path,
+                    test_df,
                 )
             except (ValueError, KeyError) as exc:
-                print(
-                    f"Warning: skip mismatched explore_ml predictions for {fold_tag}: {exc}\n"
-                    f"  Re-run: python code/explore_ml.py"
-                )
-        else:
-            print(
-                f"Warning: missing explore_ml predictions for {fold_tag}: {ml_pred_path}\n"
-                f"  Re-run: python code/explore_ml.py"
+                print(f"[{fold_tag}] Existing residual predictions are stale: {exc}")
+        if residual_learning_predictions is None:
+            residual_group_dir = _resolve_path(root, args.residual_learning_dir)
+            residual_output_dir = (
+                residual_group_dir.parent
+                if residual_group_dir.name.lower() == "all"
+                else residual_group_dir
             )
-
-        if not residual_pred_path.exists():
-            raise FileNotFoundError(
-                f"Missing residual-learning predictions for {fold_tag}: {residual_pred_path}. "
-                "Run ml_residual_learning.py first."
+            run_python_dependency(
+                script_path=root / "code" / "ml_residual_learning.py",
+                root=root,
+                extra_args=[
+                    "--split-dir",
+                    str(split_dir),
+                    "--output-dir",
+                    str(residual_output_dir),
+                ],
+                label="residual_learning",
             )
-        residual_learning_predictions = load_residual_learning_predictions(
-            residual_pred_path,
-            test_df,
-        )
+            residual_learning_predictions = load_residual_learning_predictions(
+                residual_pred_path,
+                test_df,
+            )
         print(
             f"[{fold_tag}] Loaded residual predictions: "
             f"{list(residual_learning_predictions)} from {residual_pred_path}"
@@ -1017,7 +1062,7 @@ def main() -> None:
     else:
         print("Skip explore species accuracy CSV: no evaluation splits completed.")
 
-    print(f"\nWrote per-split results under: {out_dir}/<f_1|f_2|test>/")
+    print(f"\nWrote held-out evaluation results under: {out_dir}/test/")
     print(f"Wrote fold summary: {out_dir}/explore_metrics_by_fold.csv")
     print(f"Wrote linear fold summary: {out_dir}/explore_linear_metrics_by_fold.csv")
 
