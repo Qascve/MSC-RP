@@ -90,8 +90,8 @@ def prepare_modeling_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = out[(out["temperature"] + 273.15) > 0].copy()
 
     temp_k = out["temperature"] + 273.15
-    out["log_mass"] = np.log(out["wet_Mass_kg"].to_numpy())
-    out["log_BMR"] = np.log(out["BMR"].to_numpy())
+    out["log_mass"] = np.log10(out["wet_Mass_kg"].to_numpy())
+    out["log_BMR"] = np.log10(out["BMR"].to_numpy())
     out["inv_kT"] = 1.0 / (K_BOLTZMANN_EV_PER_K * temp_k.to_numpy())
     out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=OUTPUT_COLUMNS).copy()
     return out.reset_index(drop=True)
@@ -261,6 +261,17 @@ def main() -> None:
     out = prepare_modeling_frame(raw)
     if out.empty:
         raise ValueError("No valid rows left after filtering required columns.")
+
+    species_per_class = out.groupby("class")["taxon_name"].nunique()
+    drop_classes = species_per_class[species_per_class < 7].index.tolist()
+    if drop_classes:
+        out = out[~out["class"].isin(drop_classes)].copy().reset_index(drop=True)
+        print(
+            "Dropped classes with fewer than 7 species: "
+            + ", ".join(str(c) for c in sorted(drop_classes))
+        )
+    if out.empty:
+        raise ValueError("No rows left after dropping classes with fewer than 7 species.")
 
     cv_species, holdout, summary = assign_species_to_buckets(out, random_state=args.seed)
     included_classes = set(summary.loc[summary["included"], "class"].astype(str))

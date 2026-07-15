@@ -104,10 +104,12 @@ def clean_input_data(path: Path) -> pd.DataFrame:
     out = out.dropna(subset=BASE_COLUMNS).copy()
     out = out[(out["wet_Mass_kg"] > 0) & (out[TARGET] > 0)].copy()
     out = out[(out["temperature"] + 273.15) > 0].copy()
+    species_per_class = out.groupby(CLASS_COL)[SPECIES_COL].transform("nunique")
+    out = out[species_per_class >= 7].copy()
 
     temp_k = out["temperature"] + 273.15
-    out["log_mass"] = np.log(out["wet_Mass_kg"].to_numpy())
-    out[LOG_TARGET] = np.log(out[TARGET].to_numpy())
+    out["log_mass"] = np.log10(out["wet_Mass_kg"].to_numpy())
+    out[LOG_TARGET] = np.log10(out[TARGET].to_numpy())
     out["inv_kT"] = 1.0 / (K_BOLTZMANN_EV_PER_K * temp_k.to_numpy())
     out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=OUTPUT_COLUMNS).copy()
     out = out.reset_index(drop=True)

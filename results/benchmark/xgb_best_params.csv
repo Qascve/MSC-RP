@@ -1,2 +1,2 @@
 fold,model,max_depth,learning_rate,subsample,colsample_bytree,reg_lambda,min_child_weight,trial,f_1_val_rmse,f_1_n_estimators,f_2_val_rmse,f_2_n_estimators,f_3_val_rmse,f_3_n_estimators,f_4_val_rmse,f_4_n_estimators,cv_mean_rmse,cv_std_rmse,n_estimators,is_best
-cv4,xgboost,4.0,0.08,0.7,0.7,2.0,5.0,46.0,0.9495973308715211,215.0,0.8077749004843258,333.0,1.0601754424120198,205.0,0.9257252525202387,286.0,0.9358182315720264,0.0896542557935515,260.0,1
+cv4,xgboost,6.0,0.08,0.6,0.7,5.0,3.0,44.0,0.4382335796649651,53.0,0.4897194080719982,4.0,0.45751029129170334,44.0,0.36541196994205455,77.0,0.43771881224268033,0.04561882571520939,44.0,1

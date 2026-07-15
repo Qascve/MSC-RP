@@ -97,8 +97,8 @@ clean_observations <- function(path) {
   k_boltzmann_ev_per_k <- 8.617e-5
   df$temp_K <- df$temperature + 273.15
   df$inv_kT <- 1 / (k_boltzmann_ev_per_k * df$temp_K)
-  df$log_mass <- log(df$wet_Mass_kg)
-  df$log_BMR <- log(df$BMR)
+  df$log_mass <- log10(df$wet_Mass_kg)
+  df$log_BMR <- log10(df$BMR)
   row.names(df) <- NULL
   df
 }
@@ -344,7 +344,7 @@ main <- function() {
   train_phylo$residual_log_BMR <- stats::residuals(best_fit, type = "response")
 
   test_metrics_log <- metrics(test$log_BMR, test$y_pred_log_BMR)
-  metric_out <- data.frame(scale = "log_BMR", test_metrics_log)
+  metric_out <- data.frame(scale = "log10_BMR", test_metrics_log)
 
   aic_table$delta_AIC <- aic_table$AIC - min(aic_table$AIC, na.rm = TRUE)
   aic_table <- aic_table[order(aic_table$AIC), , drop = FALSE]
@@ -362,9 +362,9 @@ main <- function() {
       sprintf("Best model: %s", best_model_name),
       sprintf("Best AIC: %.6f", ok_aic$AIC[[1]]),
       sprintf("Pagel lambda residual test start value: %.6f", lambda_signal$lambda),
-      sprintf("log_BMR test RMSE: %.6f", test_metrics_log$rmse),
-      sprintf("log_BMR test MAE: %.6f", test_metrics_log$mae),
-      sprintf("log_BMR test R2: %.6f", test_metrics_log$r2),
+      sprintf("log10(BMR) test RMSE: %.6f", test_metrics_log$rmse),
+      sprintf("log10(BMR) test MAE: %.6f", test_metrics_log$mae),
+      sprintf("log10(BMR) test R2: %.6f", test_metrics_log$r2),
       sprintf("Bad branch count: %d", bad_branch_filter$bad_edge_count),
       sprintf("Train rows used: %d", nrow(train_phylo)),
       sprintf("Train species used: %d", length(unique(train_phylo$Species))),
@@ -376,8 +376,8 @@ main <- function() {
   cat("PGLS finished\n")
   cat("  Best model:", best_model_name, "\n")
   cat("  Best AIC:", sprintf("%.6f", ok_aic$AIC[[1]]), "\n")
-  cat("  Test RMSE (log_BMR):", sprintf("%.6f", test_metrics_log$rmse), "\n")
-  cat("  Test R2 (log_BMR):", sprintf("%.6f", test_metrics_log$r2), "\n")
+  cat("  Test RMSE (log10(BMR)):", sprintf("%.6f", test_metrics_log$rmse), "\n")
+  cat("  Test R2 (log10(BMR)):", sprintf("%.6f", test_metrics_log$r2), "\n")
   cat("  Output directory:", out_dir, "\n")
 }
 

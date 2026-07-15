@@ -82,8 +82,8 @@ def add_mte_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["temp_K"] = out[TEMP_COL] + 273.15
     out["inv_kT"] = 1.0 / (K_BOLTZMANN_EV_PER_K * out["temp_K"])
-    out["log_mass"] = np.log(out[MASS_COL].to_numpy())
-    out["log_BMR"] = np.log(out[TARGET].to_numpy())
+    out["log_mass"] = np.log10(out[MASS_COL].to_numpy())
+    out["log_BMR"] = np.log10(out[TARGET].to_numpy())
     return out
 
 
@@ -122,7 +122,7 @@ def build_design_m3(df: pd.DataFrame, clade_levels: list[str]) -> tuple[np.ndarr
 
 
 def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
-    """Evaluate on log_BMR only."""
+    """Evaluate on log10(BMR) only."""
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
     y_true_log = np.asarray(y_true_log, dtype=float)[mask]
     y_pred_log = np.asarray(y_pred_log, dtype=float)[mask]
@@ -164,7 +164,7 @@ LINEAR_MODEL_KEYS = (
 )
 
 
-def load_benchmark_predictions(path: Path, test_df: pd.DataFrame) -> dict[str, np.ndarray]:
+def load_benchmark_predictions(path: Path, eval_df: pd.DataFrame, split_label: str = "test") -> dict[str, np.ndarray]:
     pred_df = pd.read_csv(path)
     benchmark_cols = [
         c
@@ -186,18 +186,18 @@ def load_benchmark_predictions(path: Path, test_df: pd.DataFrame) -> dict[str, n
         pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
     pred_df = pred_df.dropna(subset=required).reset_index(drop=True)
 
-    y_true = test_df["log_BMR"].to_numpy()
-    if len(pred_df) != len(test_df):
+    y_true = eval_df["log_BMR"].to_numpy()
+    if len(pred_df) != len(eval_df):
         raise ValueError(
-            "Benchmark predictions row count mismatches test split "
-            f"({path}: {len(pred_df)} rows vs test {len(test_df)}). "
+            f"Benchmark predictions row count mismatches {split_label} split "
+            f"({path}: {len(pred_df)} rows vs {split_label} {len(eval_df)}). "
             "Please rerun explore_ml.py on the same train/test files."
         )
 
     if not np.allclose(pred_df["y_true"].to_numpy(), y_true, rtol=1e-10, atol=1e-12):
         raise ValueError(
-            "Benchmark predictions y_true is not aligned with current test split. "
-            "Please rerun explore_ml.py on the same test file."
+            f"Benchmark predictions y_true is not aligned with current {split_label} split. "
+            "Please rerun explore_ml.py on the same split file."
         )
 
     return {col: pred_df[col].to_numpy(dtype=float) for col in benchmark_cols}
@@ -213,7 +213,7 @@ def _residual_model_columns(pred_df: pd.DataFrame) -> list[str]:
     )
 
 
-def load_residual_learning_predictions(path: Path, test_df: pd.DataFrame) -> dict[str, np.ndarray]:
+def load_residual_learning_predictions(path: Path, eval_df: pd.DataFrame, split_label: str = "test") -> dict[str, np.ndarray]:
     pred_df = pd.read_csv(path)
     if "y_true" not in pred_df.columns:
         raise KeyError(f"{path.name} missing required column: y_true")
@@ -223,17 +223,17 @@ def load_residual_learning_predictions(path: Path, test_df: pd.DataFrame) -> dic
         pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
     pred_df = pred_df.dropna(subset=["y_true", *model_cols]).reset_index(drop=True)
 
-    y_true = test_df["log_BMR"].to_numpy()
-    if len(pred_df) != len(test_df):
+    y_true = eval_df["log_BMR"].to_numpy()
+    if len(pred_df) != len(eval_df):
         raise ValueError(
-            "Residual-learning predictions row count mismatches test split "
-            f"({path}: {len(pred_df)} rows vs test {len(test_df)}). "
+            f"Residual-learning predictions row count mismatches {split_label} split "
+            f"({path}: {len(pred_df)} rows vs {split_label} {len(eval_df)}). "
             "Please rerun ml_residual_learning.py on the same train/test files."
         )
     if not np.allclose(pred_df["y_true"].to_numpy(), y_true, rtol=1e-10, atol=1e-12):
         raise ValueError(
-            "Residual-learning predictions y_true is not aligned with current test split. "
-            "Please rerun ml_residual_learning.py on the same test file."
+            f"Residual-learning predictions y_true is not aligned with current {split_label} split. "
+            "Please rerun ml_residual_learning.py on the same split file."
         )
 
     name_map = {"random_forest": "Residual-RF", "xgboost": "Residual-XGB"}
@@ -386,23 +386,78 @@ def run_pgls_with_ape(
     return pred_df["y_pred_log_BMR"].to_numpy(dtype=float)
 
 
+def load_pgls_train_fitted(path: Path, train_df: pd.DataFrame) -> np.ndarray:
+    if not path.exists():
+        raise FileNotFoundError(f"PGLS train fitted file not found: {path}")
+    pred_df = pd.read_csv(path)
+    required = ["taxon_name", "log_BMR", "log_mass", "y_fitted_log_BMR"]
+    missing = [c for c in required if c not in pred_df.columns]
+    if missing:
+        raise KeyError(f"PGLS train output missing required columns: {', '.join(missing)}")
+
+    pred_df["taxon_name"] = pred_df["taxon_name"].astype("string").str.strip()
+    pred_df["log_BMR"] = pd.to_numeric(pred_df["log_BMR"], errors="coerce")
+    pred_df["log_mass"] = pd.to_numeric(pred_df["log_mass"], errors="coerce")
+    pred_df["y_fitted_log_BMR"] = pd.to_numeric(pred_df["y_fitted_log_BMR"], errors="coerce")
+    pred_df = pred_df.dropna(subset=required).copy()
+
+    merge_keys = ["taxon_name", "log_BMR", "log_mass"]
+    train_keys = train_df[merge_keys].copy()
+    train_keys["taxon_name"] = train_keys["taxon_name"].astype("string").str.strip()
+    merged = train_keys.merge(
+        pred_df[merge_keys + ["y_fitted_log_BMR"]],
+        on=merge_keys,
+        how="left",
+    )
+    if int(merged["y_fitted_log_BMR"].notna().sum()) == 0:
+        raise ValueError("PGLS train fitted values could not be aligned with development data.")
+    return merged["y_fitted_log_BMR"].to_numpy(dtype=float)
+
+
+def _build_model_metrics(
+    eval_df: pd.DataFrame,
+    predictions: dict[str, np.ndarray],
+    comparison_mask: np.ndarray | None = None,
+) -> pd.DataFrame:
+    y_true = eval_df["log_BMR"].to_numpy()
+    if comparison_mask is None:
+        comparison_mask = np.ones(len(eval_df), dtype=bool)
+    metric_rows = []
+    for model_name, y_pred in sorted(predictions.items()):
+        metric_rows.append(
+            {
+                "model": model_name,
+                **evaluate(y_true[comparison_mask], y_pred[comparison_mask]),
+            }
+        )
+    metrics_df = pd.DataFrame(metric_rows).sort_values("rmse").reset_index(drop=True)
+    metrics_df["model_key"] = metrics_df["model"]
+    metrics_df["model"] = metrics_df["model"].map(to_short_model_name)
+    return metrics_df
+
+
 def run_models(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     benchmark_predictions: dict[str, np.ndarray],
+    benchmark_train_predictions: dict[str, np.ndarray],
     pgls_predictions: np.ndarray,
+    pgls_train_predictions: np.ndarray,
     residual_learning_predictions: dict[str, np.ndarray],
-) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
+    residual_train_predictions: dict[str, np.ndarray],
+) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray, pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     y_train_log = train_df["log_BMR"].to_numpy()
 
     # m0: log_BMR ~ offset(0.75 * log_mass)
     alpha_m0 = float(np.mean(y_train_log - 0.75 * train_df["log_mass"].to_numpy()))
+    yhat_m0_train = alpha_m0 + 0.75 * train_df["log_mass"].to_numpy()
     yhat_m0_log = alpha_m0 + 0.75 * test_df["log_mass"].to_numpy()
 
     # m1: log_BMR ~ log_mass
     X1_train = np.column_stack([np.ones(len(train_df)), train_df["log_mass"].to_numpy()])
     X1_test = np.column_stack([np.ones(len(test_df)), test_df["log_mass"].to_numpy()])
     coef_m1 = fit_ols(X1_train, y_train_log)
+    yhat_m1_train = predict_ols(X1_train, coef_m1)
     yhat_m1_log = predict_ols(X1_test, coef_m1)
 
     # m2: log_BMR ~ log_mass + inv_kT
@@ -421,6 +476,7 @@ def run_models(
         ]
     )
     coef_m2 = fit_ols(X2_train, y_train_log)
+    yhat_m2_train = predict_ols(X2_train, coef_m2)
     yhat_m2_log = predict_ols(X2_test, coef_m2)
 
     # m3: log_BMR ~ log_mass + inv_kT + class
@@ -439,6 +495,7 @@ def run_models(
     X3_train, names_m3 = build_design_m3(train_df, clade_levels)
     X3_test, _ = build_design_m3(test_df_m3, clade_levels)
     coef_m3 = fit_ols(X3_train, y_train_log)
+    yhat_m3_train = predict_ols(X3_train, coef_m3)
     yhat_m3_log = predict_ols(X3_test, coef_m3)
 
     y_true = test_df["log_BMR"].to_numpy()
@@ -450,6 +507,15 @@ def run_models(
         **benchmark_predictions,
         **residual_learning_predictions,
     }
+    train_predictions: dict[str, np.ndarray] = {
+        "m0_fixed_b_3_4": yhat_m0_train,
+        "m1_estimated_b": yhat_m1_train,
+        "m2_baseline_mte": yhat_m2_train,
+        "m3_clade_specific_mte": yhat_m3_train,
+        "m4_pgls_ape_mte": pgls_train_predictions,
+        **benchmark_train_predictions,
+        **residual_train_predictions,
+    }
 
     comparison_mask = np.ones(len(test_df), dtype=bool)
     for y_pred in residual_learning_predictions.values():
@@ -457,61 +523,30 @@ def run_models(
     if not bool(comparison_mask.any()):
         comparison_mask = np.ones(len(test_df), dtype=bool)
 
-    metric_rows = []
-    metric_rows.append(
-        {
-            "model": "m0_fixed_b_3_4",
-            **evaluate(y_true[comparison_mask], predictions["m0_fixed_b_3_4"][comparison_mask]),
-        }
-    )
-    metric_rows.append(
-        {
-            "model": "m1_estimated_b",
-            **evaluate(y_true[comparison_mask], predictions["m1_estimated_b"][comparison_mask]),
-        }
-    )
-    metric_rows.append(
-        {
-            "model": "m2_baseline_mte",
-            **evaluate(y_true[comparison_mask], predictions["m2_baseline_mte"][comparison_mask]),
-        }
-    )
+    train_comparison_mask = np.ones(len(train_df), dtype=bool)
+    for y_pred in residual_train_predictions.values():
+        train_comparison_mask &= np.isfinite(y_pred)
+    if not bool(train_comparison_mask.any()):
+        train_comparison_mask = np.ones(len(train_df), dtype=bool)
 
     if len(test_df_m3) > 0:
         y_pred_m3_full = np.full(len(test_df), np.nan, dtype=float)
         y_pred_m3_full[known_mask.to_numpy()] = yhat_m3_log
         predictions["m3_clade_specific_mte"] = y_pred_m3_full
-        metric_rows.append(
-            {
-                "model": "m3_clade_specific_mte",
-                **evaluate(y_true[comparison_mask], y_pred_m3_full[comparison_mask]),
-            }
-        )
 
-    pgls_mask = ~np.isnan(predictions["m4_pgls_ape_mte"]) & comparison_mask
-    if bool(pgls_mask.any()):
-        metric_rows.append(
-            {
-                "model": "m4_pgls_ape_mte",
-                **evaluate(y_true[pgls_mask], predictions["m4_pgls_ape_mte"][pgls_mask]),
-            }
-        )
-    for model_name in sorted(benchmark_predictions):
-        metric_rows.append(
-            {"model": model_name, **evaluate(y_true[comparison_mask], predictions[model_name][comparison_mask])}
-        )
-    for model_name in sorted(residual_learning_predictions):
-        metric_rows.append(
-            {"model": model_name, **evaluate(y_true[comparison_mask], predictions[model_name][comparison_mask])}
-        )
-
-    metrics_df = pd.DataFrame(metric_rows).sort_values("rmse").reset_index(drop=True)
-    # Keep original keys for splitting linear vs external before renaming.
-    metrics_df["model_key"] = metrics_df["model"]
-    metrics_df["model"] = metrics_df["model"].map(to_short_model_name)
+    metrics_df = _build_model_metrics(test_df, predictions, comparison_mask)
+    train_metrics_df = _build_model_metrics(train_df, train_predictions, train_comparison_mask)
     predictions_short = {to_short_model_name(k): v for k, v in predictions.items()}
+    train_predictions_short = {to_short_model_name(k): v for k, v in train_predictions.items()}
 
-    return metrics_df, predictions_short, y_true
+    return (
+        metrics_df,
+        predictions_short,
+        y_true,
+        train_metrics_df,
+        train_predictions_short,
+        y_train_log,
+    )
 
 
 def split_linear_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
@@ -648,11 +683,11 @@ def save_model_performance_plot(
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, 6))
 
     sns.barplot(data=plot_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
-    axes[0].set_title("RMSE (log_BMR)")
+    axes[0].set_title("RMSE (log10(BMR))")
     axes[0].tick_params(axis="x", rotation=45, labelsize=9)
 
     sns.barplot(data=plot_df, x="model", y="r2", ax=axes[1], color="#C44E52")
-    axes[1].set_title("R2 (log_BMR)")
+    axes[1].set_title("R2 (log10(BMR))")
     axes[1].tick_params(axis="x", rotation=45, labelsize=9)
 
     for ax in axes:
@@ -736,7 +771,7 @@ def save_top5_plus_residual_learning_plot(
         ax=axes[0],
         color="#4C72B0",
     )
-    axes[0].set_title("RMSE (log_BMR)")
+    axes[0].set_title("RMSE (log10(BMR))")
     axes[0].tick_params(axis="x", rotation=25)
 
     sns.barplot(
@@ -747,7 +782,7 @@ def save_top5_plus_residual_learning_plot(
         ax=axes[1],
         color="#C44E52",
     )
-    axes[1].set_title("R2 (log_BMR)")
+    axes[1].set_title("R2 (log10(BMR))")
     axes[1].tick_params(axis="x", rotation=25)
 
     for ax in axes:
@@ -785,9 +820,9 @@ def save_residual_plot(
         residual = y_true[mask] - y_pred[mask]
         plt.scatter(pred_x, residual, s=14, alpha=0.45, label=model_name)
     plt.axhline(0.0, color="k", linestyle="--", linewidth=1)
-    plt.xlabel("Predicted log_BMR")
+    plt.xlabel("Predicted log10(BMR)")
     plt.ylabel("Residual (log Observed - log Predicted)")
-    plt.title("Residual Plot (log_BMR)")
+    plt.title("Residual Plot (log10(BMR))")
     plt.legend()
     plt.tight_layout()
     output_path = out_dir / "residual_plot_all_models.png"
@@ -797,30 +832,36 @@ def save_residual_plot(
 
 
 def save_explore_predictions(
-    test_df: pd.DataFrame,
+    eval_df: pd.DataFrame,
     y_true: np.ndarray,
     predictions: dict[str, np.ndarray],
     out_dir: Path,
+    split: str = "test",
     fold_tag: str | None = None,
 ) -> Path:
-    pred_df = test_df[["taxon_name", CLADE_COL, "log_mass", "inv_kT"]].copy()
+    pred_df = eval_df[["taxon_name", CLADE_COL, "log_mass", "inv_kT"]].copy()
     pred_df["y_true"] = y_true
+    pred_df["eval_split"] = split
     for model_name, y_pred in predictions.items():
         pred_df[model_name] = y_pred
     if fold_tag is not None:
         pred_df["fold"] = fold_tag
-    path = out_dir / "explore_predictions_test.csv"
+    path = (
+        out_dir / "explore_predictions_test.csv"
+        if split == "test"
+        else out_dir / f"explore_predictions_{split}.csv"
+    )
     pred_df.to_csv(path, index=False, encoding="utf-8")
     return path
 
 
 def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
-    """Symmetric accuracy on log_BMR: exp(-|pred - true|)."""
+    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     out = np.full(len(y_true_log), np.nan, dtype=float)
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
-    out[mask] = np.exp(-np.abs(y_pred_log[mask] - y_true_log[mask]))
+    out[mask] = 10.0 ** (-np.abs(y_pred_log[mask] - y_true_log[mask]))
     return np.clip(out, 0.0, 1.0)
 
 
@@ -931,10 +972,20 @@ def main() -> None:
             / fold_tag
             / "explore_ml_predictions_test.csv"
         )
+        ml_train_pred_path = (
+            _resolve_path(root, args.benchmark_predictions_dir)
+            / fold_tag
+            / "explore_ml_predictions_train.csv"
+        )
         residual_pred_path = (
             _resolve_path(root, args.residual_learning_dir)
             / fold_tag
             / "benchmark_predictions_test.csv"
+        )
+        residual_train_pred_path = (
+            _resolve_path(root, args.residual_learning_dir)
+            / fold_tag
+            / "benchmark_predictions_train.csv"
         )
         pgls_fold_out = _resolve_path(root, args.pgls_output_dir) / fold_tag
 
@@ -943,12 +994,20 @@ def main() -> None:
         test_df = add_mte_features(load_split_data(test_path))
 
         benchmark_predictions: dict[str, np.ndarray] | None = None
+        benchmark_train_predictions: dict[str, np.ndarray] | None = None
         if ml_pred_path.exists():
             try:
-                benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df)
+                benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df, "test")
             except (ValueError, KeyError) as exc:
-                print(f"[{fold_tag}] Existing explore_ml predictions are stale: {exc}")
-        if benchmark_predictions is None:
+                print(f"[{fold_tag}] Existing explore_ml test predictions are stale: {exc}")
+        if ml_train_pred_path.exists():
+            try:
+                benchmark_train_predictions = load_benchmark_predictions(
+                    ml_train_pred_path, train_df, "train"
+                )
+            except (ValueError, KeyError) as exc:
+                print(f"[{fold_tag}] Existing explore_ml train predictions are stale: {exc}")
+        if benchmark_predictions is None or benchmark_train_predictions is None:
             ml_output_dir = _resolve_path(root, args.benchmark_predictions_dir)
             run_python_dependency(
                 script_path=root / "code" / "explore_ml.py",
@@ -961,22 +1020,37 @@ def main() -> None:
                 ],
                 label="explore_ml",
             )
-            benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df)
+            benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df, "test")
+            benchmark_train_predictions = load_benchmark_predictions(
+                ml_train_pred_path, train_df, "train"
+            )
         print(
             f"[{fold_tag}] Loaded explore_ml predictions: "
-            f"{len(benchmark_predictions)} models from {ml_pred_path}"
+            f"{len(benchmark_predictions)} test models, "
+            f"{len(benchmark_train_predictions)} train models"
         )
 
         residual_learning_predictions: dict[str, np.ndarray] | None = None
+        residual_train_predictions: dict[str, np.ndarray] | None = None
         if residual_pred_path.exists():
             try:
                 residual_learning_predictions = load_residual_learning_predictions(
                     residual_pred_path,
                     test_df,
+                    "test",
                 )
             except (ValueError, KeyError) as exc:
-                print(f"[{fold_tag}] Existing residual predictions are stale: {exc}")
-        if residual_learning_predictions is None:
+                print(f"[{fold_tag}] Existing residual test predictions are stale: {exc}")
+        if residual_train_pred_path.exists():
+            try:
+                residual_train_predictions = load_residual_learning_predictions(
+                    residual_train_pred_path,
+                    train_df,
+                    "train",
+                )
+            except (ValueError, KeyError) as exc:
+                print(f"[{fold_tag}] Existing residual train predictions are stale: {exc}")
+        if residual_learning_predictions is None or residual_train_predictions is None:
             residual_group_dir = _resolve_path(root, args.residual_learning_dir)
             residual_output_dir = (
                 residual_group_dir.parent
@@ -997,10 +1071,17 @@ def main() -> None:
             residual_learning_predictions = load_residual_learning_predictions(
                 residual_pred_path,
                 test_df,
+                "test",
+            )
+            residual_train_predictions = load_residual_learning_predictions(
+                residual_train_pred_path,
+                train_df,
+                "train",
             )
         print(
             f"[{fold_tag}] Loaded residual predictions: "
-            f"{list(residual_learning_predictions)} from {residual_pred_path}"
+            f"test={list(residual_learning_predictions)}, "
+            f"train={list(residual_train_predictions)}"
         )
 
         pgls_predictions = run_pgls_with_ape(
@@ -1013,23 +1094,46 @@ def main() -> None:
             r_script_path=args.pgls_r_script,
             out_dir=pgls_fold_out,
         )
+        pgls_train_predictions = load_pgls_train_fitted(
+            pgls_fold_out / "pgls_train_fitted.csv",
+            train_df,
+        )
 
-        metrics_df, predictions, y_true = run_models(
+        (
+            metrics_df,
+            predictions,
+            y_true,
+            train_metrics_df,
+            train_predictions,
+            y_train,
+        ) = run_models(
             train_df,
             test_df,
             benchmark_predictions,
+            benchmark_train_predictions,
             pgls_predictions,
+            pgls_train_predictions,
             residual_learning_predictions,
+            residual_train_predictions,
         )
-        save_explore_predictions(test_df, y_true, predictions, fold_out, fold_tag=fold_tag)
+        save_explore_predictions(test_df, y_true, predictions, fold_out, split="test", fold_tag=fold_tag)
+        save_explore_predictions(
+            train_df, y_train, train_predictions, fold_out, split="train", fold_tag=fold_tag
+        )
 
         linear_metrics = split_linear_metrics(metrics_df)
         linear_path = fold_out / "explore_linear_metrics.csv"
         linear_metrics.to_csv(linear_path, index=False, encoding="utf-8")
+        train_linear_metrics = split_linear_metrics(train_metrics_df)
+        train_linear_path = fold_out / "explore_linear_metrics_train.csv"
+        train_linear_metrics.to_csv(train_linear_path, index=False, encoding="utf-8")
 
         metrics_path = fold_out / "explore_metrics.csv"
         metrics_out = metrics_df.drop(columns=["model_key"], errors="ignore")
         metrics_out.to_csv(metrics_path, index=False, encoding="utf-8")
+        train_metrics_path = fold_out / "explore_metrics_train.csv"
+        train_metrics_out = train_metrics_df.drop(columns=["model_key"], errors="ignore")
+        train_metrics_out.to_csv(train_metrics_path, index=False, encoding="utf-8")
 
         plot_path = save_model_performance_plot(metrics_out, fold_out, fold_tag=fold_tag)
         residual_short = {
@@ -1044,12 +1148,16 @@ def main() -> None:
         )
         residual_plot_path = save_residual_plot(y_true, predictions, fold_out)
 
-        print(f"\n[{fold_tag}] LINEAR / PHYLO M0-M4:")
+        print(f"\n[{fold_tag}] TRAIN FIT (RMSE/MAE on log10(BMR)):")
+        print(train_metrics_out.to_string(index=False))
+        print(f"\n[{fold_tag}] LINEAR / PHYLO M0-M4 (RMSE/MAE on log10(BMR)):")
         print(linear_metrics.to_string(index=False))
-        print(f"\n[{fold_tag}] ALL MODELS (linear + ML + residual):")
+        print(f"\n[{fold_tag}] ALL MODELS (linear + ML + residual; RMSE/MAE on log10(BMR)):")
         print(metrics_out.to_string(index=False))
         print(f"[{fold_tag}] Saved linear metrics: {linear_path}")
+        print(f"[{fold_tag}] Saved train linear metrics: {train_linear_path}")
         print(f"[{fold_tag}] Saved all metrics: {metrics_path}")
+        print(f"[{fold_tag}] Saved train metrics: {train_metrics_path}")
         print(f"[{fold_tag}] Saved plot: {plot_path}")
         print(f"[{fold_tag}] Saved top-5 + residual plot: {top5_residual_plot_path}")
         print(f"[{fold_tag}] Saved top-5 + residual metrics: {top5_residual_metrics_path}")

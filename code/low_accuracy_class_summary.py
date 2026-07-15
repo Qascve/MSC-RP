@@ -23,13 +23,13 @@ def resolve_path(root: Path, path: Path) -> Path:
 
 
 def fold_accuracy(y_true: pd.Series, y_pred: pd.Series) -> np.ndarray:
-    """Symmetric accuracy on log_BMR: exp(-|log_pred - log_true|)."""
+    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
     y_true_arr = pd.to_numeric(y_true, errors="coerce").to_numpy(dtype=float)
     y_pred_arr = pd.to_numeric(y_pred, errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(y_true_arr) & np.isfinite(y_pred_arr)
 
     out = np.full(len(y_true_arr), np.nan, dtype=float)
-    out[valid] = np.exp(-np.abs(y_pred_arr[valid] - y_true_arr[valid]))
+    out[valid] = 10.0 ** (-np.abs(y_pred_arr[valid] - y_true_arr[valid]))
     return np.clip(out, 0.0, 1.0)
 
 

@@ -19,11 +19,14 @@ from sklearn.utils.class_weight import compute_class_weight
 from xgboost import XGBRegressor
 
 TARGET = "BMR"
+MASS_COL = "wet_Mass_kg"
 LOG_TARGET = "log_BMR"
+LOG10_SCALE = "log10_BMR"
 MODEL_NAMES = ["random_forest", "xgboost"]
-POWER_LAW_FEATURES = ["log_mass"]
-TAXONOMY_MODEL_FEATURES = ["class", "order", "family"]
+CLADE_COL = "class"
+TAXONOMY_MODEL_FEATURES = ["class"]
 TAXONOMY_METADATA_COLUMNS = ["class", "order", "family", "Genus", "species"]
+BASELINE_MODEL = "m3_linear"
 KEEP_CLASSES = {
     "Teleostei",
     "Insecta",
@@ -101,6 +104,28 @@ def find_root(marker: str = ".gitignore") -> Path:
     raise FileNotFoundError(f"Cannot find project root by marker: {marker}")
 
 
+def _assert_log10_target_columns(df: pd.DataFrame, path: Path) -> None:
+    """Reject stale split CSVs that still store natural-log targets."""
+    if LOG_TARGET not in df.columns or TARGET not in df.columns:
+        return
+    csv_log = pd.to_numeric(df[LOG_TARGET], errors="coerce").to_numpy(dtype=float)
+    bmr = pd.to_numeric(df[TARGET], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(csv_log) & np.isfinite(bmr) & (bmr > 0)
+    if not bool(mask.any()):
+        return
+    log10_bmr = np.log10(bmr[mask])
+    if np.allclose(csv_log[mask], log10_bmr, rtol=1e-8, atol=1e-10):
+        return
+    ln_bmr = np.log(bmr[mask])
+    msg = (
+        f"{path.name}: column {LOG_TARGET} does not match log10({TARGET}). "
+        "Recompute splits with: python code/split_train_test_bmr.py"
+    )
+    if np.allclose(csv_log[mask], ln_bmr, rtol=1e-8, atol=1e-10):
+        msg += " (values look like natural log / ln)."
+    raise ValueError(msg)
+
+
 def load_split_data(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
     keep_cols = list(
@@ -109,6 +134,7 @@ def load_split_data(path: Path) -> pd.DataFrame:
                 "taxon_name",
                 *TAXONOMY_METADATA_COLUMNS,
                 *TREE_MODEL_FEATURES,
+                MASS_COL,
                 TARGET,
                 LOG_TARGET,
             ]
@@ -118,18 +144,23 @@ def load_split_data(path: Path) -> pd.DataFrame:
     if missing:
         raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
 
+    _assert_log10_target_columns(df, path)
+
     out = df[keep_cols].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
     for col in TAXONOMY_METADATA_COLUMNS:
         out[col] = out[col].astype("string").str.strip()
     numeric_features = ["log_mass", "inv_kT", "pc1", "pc2", "pc3", "pc4", "pc5"]
-    for col in numeric_features + [TARGET, LOG_TARGET]:
+    for col in numeric_features + [MASS_COL, TARGET, LOG_TARGET]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out["taxon_name"] = out["taxon_name"].replace("", pd.NA)
     for col in TAXONOMY_METADATA_COLUMNS:
         out[col] = out[col].replace("", pd.NA)
     out = out.dropna(subset=keep_cols).copy()
-    out = out[(out["log_mass"].notna()) & (out["inv_kT"].notna()) & (out[TARGET] > 0)].copy()
+    out = out[(out[MASS_COL] > 0) & (out[TARGET] > 0)].copy()
+    out = out[(out["log_mass"].notna()) & (out["inv_kT"].notna())].copy()
+    out["log_mass"] = np.log10(out[MASS_COL].to_numpy(dtype=float))
+    out[LOG_TARGET] = np.log10(out[TARGET].to_numpy(dtype=float))
     out = out[out["taxon_name"] != ""].copy()
     out = out[out["class"].isin(KEEP_CLASSES)].copy()
     return out.reset_index(drop=True)
@@ -171,8 +202,36 @@ def assert_no_species_leakage(train_df: pd.DataFrame, test_df: pd.DataFrame) -> 
         raise RuntimeError(f"Species leakage detected in fixed split: {sorted(leaked)[:5]}")
 
 
-def fit_alpha_three_quarter(log_mass: np.ndarray, log_bmr: np.ndarray) -> float:
-    return float(np.mean(log_bmr - 0.75 * log_mass))
+def fit_m3_baseline(train_df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
+    """Fit M3-L: log10(BMR) ~ log_mass + inv_kT + class (additive OLS)."""
+    clade_levels = sorted(train_df[CLADE_COL].dropna().astype(str).unique().tolist())
+    if not clade_levels:
+        raise ValueError("No class levels available to fit the M3-L baseline.")
+    X = build_m3_design_matrix(train_df, clade_levels)
+    y = train_df[LOG_TARGET].to_numpy(dtype=float)
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    return coef, clade_levels
+
+
+def build_m3_design_matrix(df: pd.DataFrame, clade_levels: list[str]) -> np.ndarray:
+    clade_dummies = pd.get_dummies(df[CLADE_COL].astype(str), dtype=float).reindex(
+        columns=clade_levels[1:],
+        fill_value=0.0,
+    )
+    return np.column_stack(
+        [
+            np.ones(len(df), dtype=float),
+            df["log_mass"].to_numpy(dtype=float),
+            df["inv_kT"].to_numpy(dtype=float),
+            clade_dummies.to_numpy(dtype=float),
+        ]
+    )
+
+
+def predict_m3_baseline(
+    df: pd.DataFrame, coef: np.ndarray, clade_levels: list[str]
+) -> np.ndarray:
+    return build_m3_design_matrix(df, clade_levels) @ coef
 
 
 def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
@@ -219,13 +278,16 @@ def draw_unique_param_sets(grid: dict, n_trials: int, random_state: int) -> list
 
 
 def encode_train_frame(
-    df: pd.DataFrame, alpha: float, feature_columns: list[str] | None = None
+    df: pd.DataFrame,
+    m3_coef: np.ndarray,
+    m3_clade_levels: list[str],
+    feature_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """Encode residual features for one frame; optionally align to saved columns."""
     cat = [c for c in TREE_MODEL_FEATURES if c in TAXONOMY_MODEL_FEATURES]
     raw = df[TREE_MODEL_FEATURES].reset_index(drop=True).copy()
     encoded = pd.get_dummies(raw, columns=cat, prefix=cat, dtype=float)
-    base = alpha + 0.75 * df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float)
+    base = predict_m3_baseline(df, m3_coef, m3_clade_levels)
     if feature_columns is not None:
         encoded = encoded.reindex(columns=feature_columns, fill_value=0.0)
     residual = df[LOG_TARGET].to_numpy(dtype=float) - base
@@ -283,8 +345,8 @@ def tune_models_on_train(
     Tune XGB by fixed four-fold species-block CV, then retrain RF and XGB on
     the complete 80% development set.
 
-    Each CV baseline alpha is fitted only on that fold's three training
-    partitions. Validation targets therefore never contribute to alpha.
+    Each CV M3-L baseline is fitted only on that fold's three training
+    partitions. Validation targets therefore never contribute to the baseline.
     """
     if len(cv_splits) != 4:
         raise ValueError(f"Expected exactly four CV splits, got {len(cv_splits)}.")
@@ -292,14 +354,13 @@ def tune_models_on_train(
     prepared_splits: list[dict] = []
     for fold_tag, fit_df, val_df in cv_splits:
         assert_no_species_leakage(fit_df, val_df)
-        alpha_inner = fit_alpha_three_quarter(
-            fit_df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float),
-            fit_df[LOG_TARGET].to_numpy(dtype=float),
+        m3_coef_inner, m3_clade_levels_inner = fit_m3_baseline(fit_df)
+        X_fit, residual_fit, _ = encode_train_frame(
+            fit_df, m3_coef_inner, m3_clade_levels_inner
         )
-        X_fit, residual_fit, _ = encode_train_frame(fit_df, alpha_inner)
         feature_columns_inner = list(X_fit.columns)
         X_val, residual_val, _ = encode_train_frame(
-            val_df, alpha_inner, feature_columns_inner
+            val_df, m3_coef_inner, m3_clade_levels_inner, feature_columns_inner
         )
         prepared_splits.append(
             {
@@ -320,7 +381,7 @@ def tune_models_on_train(
                 ),
                 "val_species": int(val_df["taxon_name"].nunique()),
                 "val_rows": int(len(val_df)),
-                "alpha_inner": float(alpha_inner),
+                "m3_n_clade_levels": len(m3_clade_levels_inner),
             }
         )
 
@@ -395,12 +456,11 @@ def tune_models_on_train(
         else []
     )
 
-    # Re-estimate alpha only after selection, now using all four development folds.
-    alpha_full = fit_alpha_three_quarter(
-        full_train_df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float),
-        full_train_df[LOG_TARGET].to_numpy(dtype=float),
+    # Re-estimate M3-L only after selection, now using all four development folds.
+    m3_coef_full, m3_clade_levels_full = fit_m3_baseline(full_train_df)
+    X_all, residual_all, _ = encode_train_frame(
+        full_train_df, m3_coef_full, m3_clade_levels_full
     )
-    X_all, residual_all, _ = encode_train_frame(full_train_df, alpha_full)
     feature_columns = list(X_all.columns)
     sw_all = (
         make_class_balanced_sample_weight(full_train_df)
@@ -448,7 +508,8 @@ def tune_models_on_train(
 
     return {
         "models": {"random_forest": rf_full, "xgboost": xgb_full},
-        "alpha": float(alpha_full),
+        "m3_coef": m3_coef_full,
+        "m3_clade_levels": m3_clade_levels_full,
         "feature_columns": feature_columns,
         "best_params": {
             "random_forest": {
@@ -481,7 +542,7 @@ def tune_models_on_train(
                 "fold": split["fold_tag"],
                 "val_species": split["val_species"],
                 "val_rows": split["val_rows"],
-                "alpha_inner": split["alpha_inner"],
+                "m3_n_clade_levels": split["m3_n_clade_levels"],
             }
             for split in prepared_splits
         ],
@@ -500,7 +561,9 @@ def save_model_bundle(bundle: dict, model_dir: Path) -> Path:
     for name in MODEL_NAMES:
         joblib.dump(bundle["models"][name], model_dir / f"{name}.joblib")
     meta = {
-        "alpha": bundle["alpha"],
+        "baseline_model": BASELINE_MODEL,
+        "m3_coef": [float(v) for v in bundle["m3_coef"]],
+        "m3_clade_levels": list(bundle["m3_clade_levels"]),
         "feature_columns": bundle["feature_columns"],
         "best_params": bundle["best_params"],
         "inner_val_species": bundle["inner_val_species"],
@@ -608,9 +671,15 @@ def load_model_bundle(model_dir: Path) -> dict:
                 f"Missing {name} model: {model_path}. Rerun this fold."
             )
         models[name] = joblib.load(model_path)
+    if "m3_coef" not in meta:
+        raise ValueError(
+            f"Stale model bundle at {model_dir}: expected M3-L baseline metadata. "
+            "Rerun ml_residual_learning.py."
+        )
     return {
         "models": models,
-        "alpha": float(meta["alpha"]),
+        "m3_coef": np.asarray(meta["m3_coef"], dtype=float),
+        "m3_clade_levels": list(meta["m3_clade_levels"]),
         "feature_columns": list(meta["feature_columns"]),
         "best_params": meta.get("best_params", {}),
         "model_features": list(meta.get("model_features", TREE_MODEL_FEATURES)),
@@ -620,14 +689,15 @@ def load_model_bundle(model_dir: Path) -> dict:
 def predict_log_bmr(
     bundle: dict, df: pd.DataFrame
 ) -> tuple[dict[str, np.ndarray], dict[str, pd.DataFrame]]:
-    """Predict log_BMR with a loaded bundle; also return residual feature frames for SHAP."""
-    alpha = bundle["alpha"]
+    """Predict log10(BMR) with a loaded bundle; also return residual feature frames for SHAP."""
+    m3_coef = bundle["m3_coef"]
+    m3_clade_levels = bundle["m3_clade_levels"]
     feature_columns = bundle["feature_columns"]
     model_features = bundle.get("model_features", TREE_MODEL_FEATURES)
     cat = [c for c in model_features if c in TAXONOMY_MODEL_FEATURES]
     raw = df[model_features].reset_index(drop=True).copy()
     encoded = pd.get_dummies(raw, columns=cat, prefix=cat, dtype=float)
-    base = alpha + 0.75 * df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float)
+    base = predict_m3_baseline(df, m3_coef, m3_clade_levels)
     X = encoded.reindex(columns=feature_columns, fill_value=0.0)
 
     preds: dict[str, np.ndarray] = {}
@@ -640,7 +710,7 @@ def predict_log_bmr(
 
 
 def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
-    """Evaluate on log_BMR only."""
+    """Evaluate on log10(BMR) only."""
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
     y_true_log = np.asarray(y_true_log, dtype=float)[mask]
     y_pred_log = np.asarray(y_pred_log, dtype=float)[mask]
@@ -671,7 +741,7 @@ def save_loss_curve_from_bundle(model_dir: Path, out_dir: Path) -> None:
     ycol = "val_rmse" if "val_rmse" in lc_df.columns else lc_df.columns[-1]
     plt.plot(lc_df["iteration"], lc_df[ycol], label="val_rmse", linewidth=2)
     plt.xlabel("XGB boosting iteration")
-    plt.ylabel("RMSE (log_BMR residual)")
+    plt.ylabel("RMSE (log10(BMR) residual)")
     plt.title("XGBoost Early-Stopping Validation Loss")
     plt.legend()
     plt.tight_layout()
@@ -708,9 +778,9 @@ def save_pred_and_residual_plots(
         min_v = float(min(pred_df["y_true"].min(), pred_df[model].min()))
         max_v = float(max(pred_df["y_true"].max(), pred_df[model].max()))
         plt.plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1)
-        plt.xlabel("Observed log_BMR")
-        plt.ylabel("Predicted log_BMR")
-        plt.title(f"Observed vs Predicted log_BMR ({model})")
+        plt.xlabel("Observed log10(BMR)")
+        plt.ylabel("Predicted log10(BMR)")
+        plt.title(f"Observed vs Predicted log10(BMR) ({model})")
         plt.legend()
         plt.tight_layout()
         plt.savefig(out_dir / f"observed_vs_predicted_scatter_{model}.png", dpi=160)
@@ -721,9 +791,9 @@ def save_pred_and_residual_plots(
         residual = pred_df["y_true"] - pred_df[model]
         plt.scatter(pred_df[model], residual, s=14, alpha=0.45, label=model)
     plt.axhline(0.0, color="k", linestyle="--", linewidth=1)
-    plt.xlabel("Predicted log_BMR")
+    plt.xlabel("Predicted log10(BMR)")
     plt.ylabel("Residual (log Observed - log Predicted)")
-    plt.title("Residual Plot (log_BMR)")
+    plt.title("Residual Plot (log10(BMR))")
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_dir / "residual_plot.png", dpi=160)
@@ -761,8 +831,8 @@ def save_performance_boxplot(
     plt.figure(figsize=(9, 6))
     sns.boxplot(data=perf_df, x="model", y="rmse")
     plt.xlabel("Model")
-    plt.ylabel("Bootstrap RMSE (log_BMR)")
-    plt.title("Model Performance Boxplot (log_BMR)")
+    plt.ylabel("Bootstrap RMSE (log10(BMR))")
+    plt.title("Model Performance Boxplot (log10(BMR))")
     plt.tight_layout()
     plt.savefig(out_dir / "model_performance_boxplot.png", dpi=160)
     plt.close()
@@ -818,12 +888,12 @@ def save_shap_outputs(
 
 
 def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
-    """Symmetric accuracy on log_BMR: exp(-|pred - true|)."""
+    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     out = np.full(len(y_true_log), np.nan, dtype=float)
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
-    out[mask] = np.exp(-np.abs(y_pred_log[mask] - y_true_log[mask]))
+    out[mask] = 10.0 ** (-np.abs(y_pred_log[mask] - y_true_log[mask]))
     return np.clip(out, 0.0, 1.0)
 
 
@@ -933,6 +1003,36 @@ def write_group_eval_from_predictions(
     return metrics_df
 
 
+def save_development_train_outputs(
+    out_dir: Path,
+    fold_tag: str,
+    train_df: pd.DataFrame,
+    preds: dict[str, np.ndarray],
+) -> pd.DataFrame:
+    """Save in-sample predictions/metrics on the full 80% development set."""
+    group_out = out_dir / "all" / fold_tag
+    group_out.mkdir(parents=True, exist_ok=True)
+    prediction_columns = list(
+        dict.fromkeys(["taxon_name", *TAXONOMY_METADATA_COLUMNS, *TREE_MODEL_FEATURES])
+    )
+    pred_df = train_df[prediction_columns].copy().reset_index(drop=True)
+    pred_df["y_true"] = train_df[LOG_TARGET].to_numpy(dtype=float)
+    for name in MODEL_NAMES:
+        pred_df[name] = preds[name]
+
+    metrics_rows = []
+    for model in MODEL_NAMES:
+        metrics_rows.append(
+            {"model": model, **evaluate(pred_df["y_true"].to_numpy(dtype=float), pred_df[model].to_numpy())}
+        )
+    metrics_df = pd.DataFrame(metrics_rows).sort_values("rmse")
+    pred_df.to_csv(group_out / "benchmark_predictions_train.csv", index=False, encoding="utf-8")
+    metrics_df.to_csv(group_out / "benchmark_metrics_train.csv", index=False, encoding="utf-8")
+    print(f"\n[all/{fold_tag}] Saved development-train fit: {len(pred_df)} rows")
+    print(metrics_df.to_string(index=False))
+    return metrics_df
+
+
 def evaluate_fold_predictions(
     fold_tag: str,
     test_df: pd.DataFrame,
@@ -1023,6 +1123,13 @@ def run_four_fold_cv_global(
 
     print("  Reloading RF and XGB from disk for evaluation...", flush=True)
     loaded = load_model_bundle(model_dir)
+    train_preds, _ = predict_log_bmr(loaded, full_train_df)
+    save_development_train_outputs(
+        out_dir=out_dir,
+        fold_tag=fold_tag,
+        train_df=full_train_df,
+        preds=train_preds,
+    )
     preds, shap_inputs = predict_log_bmr(loaded, test_df)
     return evaluate_fold_predictions(
         fold_tag=fold_tag,

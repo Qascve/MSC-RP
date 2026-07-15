@@ -71,12 +71,12 @@ taxon_to_tip_label <- function(x) {
 }
 
 fold_accuracy <- function(y_true, y_pred) {
-  # Symmetric accuracy on log_BMR: exp(-|log_pred - log_true|)
+  # Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)
   y_true <- suppressWarnings(as.numeric(y_true))
   y_pred <- suppressWarnings(as.numeric(y_pred))
   out <- rep(NA_real_, length(y_true))
   valid <- is.finite(y_true) & is.finite(y_pred)
-  out[valid] <- exp(-abs(y_pred[valid] - y_true[valid]))
+  out[valid] <- 10^(-abs(y_pred[valid] - y_true[valid]))
   pmin(pmax(out, 0), 1)
 }
 

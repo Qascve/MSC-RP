@@ -92,8 +92,8 @@ def add_mte_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["temp_K"] = out[TEMP_COL] + 273.15
     out["inv_kT"] = 1.0 / (K_BOLTZMANN_EV_PER_K * out["temp_K"])
-    out["log_mass"] = np.log(out[MASS_COL].to_numpy())
-    out[LOG_TARGET] = np.log(out[TARGET].to_numpy())
+    out["log_mass"] = np.log10(out[MASS_COL].to_numpy())
+    out[LOG_TARGET] = np.log10(out[TARGET].to_numpy())
     return out
 
 
@@ -484,33 +484,46 @@ def write_hp_search_trials_csv(
 
 def save_outputs(
     fold_out: Path,
-    test_df: pd.DataFrame,
+    eval_df: pd.DataFrame,
     y_true: np.ndarray,
     predictions: dict[str, np.ndarray],
     fold_tag: str,
+    split: str,
 ) -> pd.DataFrame:
     fold_out.mkdir(parents=True, exist_ok=True)
     metric_rows = [
         {"model": name, **evaluate(y_true, pred)} for name, pred in predictions.items()
     ]
     metrics_df = pd.DataFrame(metric_rows).sort_values("rmse").reset_index(drop=True)
-    metrics_df.to_csv(fold_out / "explore_ml_metrics.csv", index=False, encoding="utf-8")
+    if split == "test":
+        metrics_path = fold_out / "explore_ml_metrics.csv"
+        pred_path = fold_out / "explore_ml_predictions_test.csv"
+    else:
+        metrics_path = fold_out / f"explore_ml_metrics_{split}.csv"
+        pred_path = fold_out / f"explore_ml_predictions_{split}.csv"
+    metrics_df.to_csv(metrics_path, index=False, encoding="utf-8")
 
-    pred_df = test_df[["taxon_name", CLADE_COL, "log_mass", "inv_kT"]].copy()
+    pred_df = eval_df[["taxon_name", CLADE_COL, "log_mass", "inv_kT"]].copy()
     pred_df["y_true"] = y_true
     pred_df["fold"] = fold_tag
+    pred_df["eval_split"] = split
     for name, pred in predictions.items():
         pred_df[name] = pred
-    pred_df.to_csv(fold_out / "explore_ml_predictions_test.csv", index=False, encoding="utf-8")
+    pred_df.to_csv(pred_path, index=False, encoding="utf-8")
+
+    if split != "test":
+        print(f"[{fold_tag}] Saved {split} metrics/predictions -> {metrics_path.name}, {pred_path.name}")
+        print(metrics_df.to_string(index=False))
+        return metrics_df
 
     sns.set_theme(style="whitegrid")
     fig_width = max(12.0, 0.8 * len(metrics_df) + 6.0)
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, 5))
     sns.barplot(data=metrics_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
-    axes[0].set_title("RMSE (log_BMR)")
+    axes[0].set_title("RMSE (log10(BMR))")
     axes[0].tick_params(axis="x", rotation=45)
     sns.barplot(data=metrics_df, x="model", y="r2", ax=axes[1], color="#C44E52")
-    axes[1].set_title("R2 (log_BMR)")
+    axes[1].set_title("R2 (log10(BMR))")
     axes[1].tick_params(axis="x", rotation=45)
     for ax in axes:
         ax.set_xlabel("")
@@ -523,7 +536,7 @@ def save_outputs(
     for name, pred in predictions.items():
         plt.scatter(pred, y_true - pred, s=10, alpha=0.35, label=name)
     plt.axhline(0.0, color="k", linestyle="--", linewidth=1)
-    plt.xlabel("Predicted log_BMR")
+    plt.xlabel("Predicted log10(BMR)")
     plt.ylabel("Residual")
     plt.title(f"ML Residual Plot ({fold_tag})")
     plt.legend(fontsize=7, ncol=2)
@@ -554,9 +567,15 @@ def run_cv_fold(
 
     print("  Reloading models from disk for evaluation...", flush=True)
     loaded = load_model_bundle(model_dir)
-    preds = predict_with_bundle(loaded, test_df)
-    y_true = test_df[LOG_TARGET].to_numpy(dtype=float)
-    save_outputs(out_dir / fold_tag, test_df, y_true, preds, fold_tag)
+    fold_out = out_dir / fold_tag
+
+    train_preds = predict_with_bundle(loaded, train_df)
+    y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
+    save_outputs(fold_out, train_df, y_train, train_preds, fold_tag, split="train")
+
+    test_preds = predict_with_bundle(loaded, test_df)
+    y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
+    save_outputs(fold_out, test_df, y_test, test_preds, fold_tag, split="test")
 
 
 def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
@@ -564,7 +583,7 @@ def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarr
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     out = np.full(len(y_true_log), np.nan, dtype=float)
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
-    out[mask] = np.exp(-np.abs(y_pred_log[mask] - y_true_log[mask]))
+    out[mask] = 10.0 ** (-np.abs(y_pred_log[mask] - y_true_log[mask]))
     return np.clip(out, 0.0, 1.0)
 
 
