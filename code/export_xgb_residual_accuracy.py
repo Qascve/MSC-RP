@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import math
+import re
 from pathlib import Path
 
 import matplotlib
@@ -246,6 +248,12 @@ def clade_accuracy(clade: Phylo.BaseTree.Clade, tip_accuracy: dict[str, float]) 
     return float(np.mean(values)) if values else np.nan
 
 
+def normalize_search_key(value: object) -> str:
+    text = str(value).strip().lower()
+    text = re.sub(r"[\s_]+", " ", text)
+    return text
+
+
 def clade_tooltip(
     clade: Phylo.BaseTree.Clade,
     accuracy: float,
@@ -279,6 +287,9 @@ def write_interactive_html(
     radius_by_clade, angle_by_clade, descendant_counts = assign_clade_layout(tree)
     clade_accuracy_cache = {id(clade): clade_accuracy(clade, tip_accuracy) for clade in tree.find_clades()}
     paths: list[str] = []
+    tip_index: list[dict[str, object]] = []
+    legend_x = 1055.0
+    legend_y = 430.0
 
     for parent in tree.find_clades(order="level"):
         for child in parent.clades:
@@ -291,9 +302,33 @@ def write_interactive_html(
                 angle_by_clade[id(child)],
             )
             tooltip = clade_tooltip(child, accuracy, descendant_counts, tip_records)
+            if child.is_terminal():
+                record = tip_records.get(child.name, {})
+                display_name = str(record.get("taxon_name", child.name.replace("_", " ")))
+                search_key = normalize_search_key(display_name)
+                tip_x, tip_y = polar_to_xy(
+                    radius_by_clade[id(child)],
+                    angle_by_clade[id(child)],
+                )
+                tip_index.append(
+                    {
+                        "key": search_key,
+                        "label": display_name,
+                        "x": round(tip_x, 3),
+                        "y": round(tip_y, 3),
+                        "tooltip": tooltip.replace("&#10;", "\n"),
+                    }
+                )
             paths.append(
                 f'<path class="branch" d="{path_data}" stroke="{color}" data-tooltip="{tooltip}"></path>'
             )
+
+    tip_index.sort(key=lambda item: str(item["label"]).lower())
+    tip_options = "".join(
+        f'<option value="{html.escape(str(item["label"]), quote=True)}"></option>'
+        for item in tip_index
+    )
+    tips_json = json.dumps(tip_index, ensure_ascii=False)
 
     html_text = f"""<!doctype html>
 <html lang="en">
@@ -318,6 +353,39 @@ def write_interactive_html(
       font-weight: 500;
       margin: 10px 0 0;
     }}
+    .search-bar {{
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      margin: 14px 0 8px;
+      flex-wrap: wrap;
+    }}
+    .search-bar input {{
+      width: min(420px, 72vw);
+      padding: 8px 10px;
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      font-size: 14px;
+    }}
+    .search-bar button {{
+      padding: 8px 14px;
+      border: 1px solid #888;
+      border-radius: 6px;
+      background: #f7f7f7;
+      font-size: 14px;
+      cursor: pointer;
+    }}
+    .search-bar button:hover {{
+      background: #ececec;
+    }}
+    #search-status {{
+      width: 100%;
+      text-align: center;
+      font-size: 13px;
+      color: #666;
+      min-height: 18px;
+    }}
     svg {{
       display: block;
       margin: 0 auto;
@@ -328,10 +396,18 @@ def write_interactive_html(
       stroke-linecap: round;
       opacity: 0.86;
       cursor: default;
+      transition: stroke-width 0.15s ease, opacity 0.15s ease;
     }}
     .branch:hover {{
       stroke-width: 3.2;
       opacity: 1;
+    }}
+    .tip-focus-ring {{
+      fill: none;
+      stroke: rgba(241, 5, 91, 0.82);
+      stroke-width: 2.4;
+      pointer-events: none;
+      visibility: hidden;
     }}
     #tooltip {{
       position: fixed;
@@ -359,7 +435,17 @@ def write_interactive_html(
 <body>
   <div class="page">
     <h1>XGB residual-learning accuracy across test-set species</h1>
-    <svg width="1120" height="1040" viewBox="0 0 1120 1040" role="img">
+    <div class="search-bar">
+      <input id="species-search" type="search" list="species-options"
+             placeholder="Search species, e.g. Rhinella marina" autocomplete="off">
+      <datalist id="species-options">
+        {tip_options}
+      </datalist>
+      <button id="search-go" type="button">Go</button>
+      <button id="search-reset" type="button">Reset view</button>
+    </div>
+    <div id="search-status"></div>
+    <svg id="tree-svg" width="1120" height="1040" viewBox="0 0 1120 1040" role="img">
       <defs>
         <linearGradient id="accuracy-gradient" x1="0" x2="0" y1="1" y2="0">
           <stop offset="0%" stop-color="{LOW_COLOR}"/>
@@ -367,10 +453,11 @@ def write_interactive_html(
           <stop offset="100%" stop-color="{HIGH_COLOR}"/>
         </linearGradient>
       </defs>
-      <g transform="translate(30, 15)">
+      <g id="tree-stage" transform="translate(60, 20) scale(1)">
         {''.join(paths)}
+        <circle id="tip-focus-ring" class="tip-focus-ring" cx="0" cy="0" r="18"></circle>
       </g>
-      <g transform="translate(980, 430)">
+      <g transform="translate({legend_x:.0f}, {legend_y:.0f})">
         <text class="legend-title" x="0" y="-18">Prediction</text>
         <text class="legend-title" x="0" y="0">accuracy</text>
         <rect x="0" y="16" width="26" height="150" fill="url(#accuracy-gradient)"></rect>
@@ -384,19 +471,144 @@ def write_interactive_html(
     <div id="tooltip"></div>
   </div>
   <script>
+    const TIPS = {tips_json};
     const tooltip = document.getElementById("tooltip");
+    const searchInput = document.getElementById("species-search");
+    const searchStatus = document.getElementById("search-status");
+    const treeStage = document.getElementById("tree-stage");
+    const tipFocusRing = document.getElementById("tip-focus-ring");
+    const defaultTransform = "translate(60, 20) scale(1)";
+    const focusScale = 2.35;
+    let pinnedTipKey = null;
+
+    function getSvgMetrics() {{
+      const svg = document.getElementById("tree-svg");
+      const rect = svg.getBoundingClientRect();
+      return {{
+        rect,
+        scaleX: rect.width / 1120,
+        scaleY: rect.height / 1040,
+      }};
+    }}
+
+    function getScreenCenter() {{
+      return {{
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2,
+      }};
+    }}
+
+    function normalizeSearchKey(value) {{
+      return String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\\s_]+/g, " ");
+    }}
+
+    function showTooltip(text, clientX, clientY) {{
+      tooltip.textContent = text;
+      tooltip.style.display = "block";
+      tooltip.style.left = `${{clientX + 14}}px`;
+      tooltip.style.top = `${{clientY + 14}}px`;
+    }}
+
+    function hideTooltip() {{
+      if (!pinnedTipKey) {{
+        tooltip.style.display = "none";
+      }}
+    }}
+
+    function focusTreeOnTip(tipX, tipY) {{
+      const {{ rect, scaleX, scaleY }} = getSvgMetrics();
+      const center = getScreenCenter();
+      const tx = (center.x - rect.left) / scaleX - tipX * focusScale;
+      const ty = (center.y - rect.top) / scaleY - tipY * focusScale;
+      treeStage.setAttribute(
+        "transform",
+        `translate(${{tx.toFixed(3)}}, ${{ty.toFixed(3)}}) scale(${{focusScale}})`
+      );
+    }}
+
+    function showTipFocusRing(tipX, tipY) {{
+      tipFocusRing.setAttribute("cx", tipX.toFixed(3));
+      tipFocusRing.setAttribute("cy", tipY.toFixed(3));
+      tipFocusRing.style.visibility = "visible";
+    }}
+
+    function hideTipFocusRing() {{
+      tipFocusRing.style.visibility = "hidden";
+    }}
+
+    function resetTreeView() {{
+      treeStage.setAttribute("transform", defaultTransform);
+      pinnedTipKey = null;
+      hideTipFocusRing();
+      searchStatus.textContent = "";
+      tooltip.style.display = "none";
+    }}
+
+    function resolveTip(query) {{
+      const key = normalizeSearchKey(query);
+      if (!key) {{
+        return null;
+      }}
+      const exact = TIPS.find((tip) => tip.key === key);
+      if (exact) {{
+        return exact;
+      }}
+      const prefixMatches = TIPS.filter((tip) => tip.key.startsWith(key));
+      if (prefixMatches.length === 1) {{
+        return prefixMatches[0];
+      }}
+      const containsMatches = TIPS.filter((tip) => tip.key.includes(key));
+      if (containsMatches.length === 1) {{
+        return containsMatches[0];
+      }}
+      return null;
+    }}
+
+    function jumpToSpecies(query) {{
+      const tip = resolveTip(query);
+      if (!tip) {{
+        pinnedTipKey = null;
+        hideTipFocusRing();
+        tooltip.style.display = "none";
+        searchStatus.textContent = "No matching species found.";
+        return false;
+      }}
+
+      pinnedTipKey = tip.key;
+      focusTreeOnTip(tip.x, tip.y);
+      showTipFocusRing(tip.x, tip.y);
+      searchInput.value = tip.label;
+      searchStatus.textContent = `Focused on ${{tip.label}}`;
+
+      const center = getScreenCenter();
+      showTooltip(tip.tooltip, center.x, center.y);
+      return true;
+    }}
+
     document.querySelectorAll(".branch").forEach((branch) => {{
-      branch.addEventListener("mouseenter", () => {{
-        tooltip.textContent = branch.dataset.tooltip;
-        tooltip.style.display = "block";
+      branch.addEventListener("mouseenter", (event) => {{
+        showTooltip(branch.dataset.tooltip, event.clientX, event.clientY);
       }});
       branch.addEventListener("mousemove", (event) => {{
-        tooltip.style.left = `${{event.clientX + 14}}px`;
-        tooltip.style.top = `${{event.clientY + 14}}px`;
+        showTooltip(branch.dataset.tooltip, event.clientX, event.clientY);
       }});
       branch.addEventListener("mouseleave", () => {{
-        tooltip.style.display = "none";
+        hideTooltip();
       }});
+    }});
+
+    document.getElementById("search-go").addEventListener("click", () => {{
+      jumpToSpecies(searchInput.value);
+    }});
+    document.getElementById("search-reset").addEventListener("click", resetTreeView);
+    searchInput.addEventListener("keydown", (event) => {{
+      if (event.key === "Enter") {{
+        event.preventDefault();
+        jumpToSpecies(searchInput.value);
+      }}
     }});
   </script>
 </body>
@@ -432,8 +644,8 @@ def write_static_png(
     )
     sm = ScalarMappable(cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=1))
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.026, pad=0.04)
-    cbar.set_label("Prediction\naccuracy", rotation=0, labelpad=28)
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.022, pad=0.01)
+    cbar.set_label("Prediction\naccuracy", rotation=0, labelpad=18)
     cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
 
     ax.set_title("XGB residual-learning accuracy across test-set species", fontsize=14, pad=18)
@@ -442,6 +654,7 @@ def write_static_png(
     ax.set_xlim(-500, 500)
     ax.set_ylim(-500, 500)
     fig.tight_layout()
+    cbar.ax.set_position([0.935, 0.24, 0.018, 0.52])
     fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
