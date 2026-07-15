@@ -1,0 +1,2 @@
+fold,model,max_depth,learning_rate,subsample,colsample_bytree,reg_lambda,min_child_weight,n_estimators,val_rmse,trial,is_best
+f_1,xgboost,10.0,0.08,0.7,0.6,0.9,3.0,36.0,0.9024926738525184,276.0,1

@@ -11,7 +11,6 @@ from typing import Any
 
 import pandas as pd
 import pytaxon.pytaxon as pytaxon_module
-from pygbif import species as gbif_species
 from pytaxon import Pytaxon
 
 
@@ -25,29 +24,30 @@ DEFAULT_PYTAXON_CONFIG = {
 }
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
-EXCLUDED_CLASSES = {
-    "Gammaproteobacteria",
-    "Bacillariophyceae",
-    "Cyanophyceae",
-    "Bacilli",
-    "Alphaproteobacteria",
-    "Prymnesiophyceae",
-    "Chlorophyceae",
-    "Dinophyceae",
-    "Actinobacteria",
-    "Deltaproteobacteria",
-    "Trebouxiophyceae",
-    "Oscillatoriophycideae",
-    "Betaproteobacteria",
-    "Xanthophyceae",
-    "Chrysophyceae",
-    "Saccharomycetes",
-    "Mollicutes",
-    "Thermoplasmata",
-    "Kinetoplastea",
-    "Euglenophyceae",
-    "Methanobacteria",
-    "Methanomicrobia",
+KEEP_CLASSES = {
+    "Teleostei",
+    "Insecta",
+    "Mammalia",
+    "Malacostraca",
+    "Reptilia",
+    "Amphibia",
+    "Maxillopoda",
+    "Aves",
+    "Arachnida",
+    "Chondrichthyes",
+    "Cephalaspidomorphi",
+    "Chondrostei",
+    "Branchiopoda",
+    "Cephalopoda",
+    "Sagittoidea",
+    "Hydrozoa",
+    "Dipnotetrapodomorpha",
+    "Ostracoda",
+    "Scyphozoa",
+    "Myxini",
+    "Chilopoda",
+    "Cladistei",
+    "Gastropoda",
 }
 
 
@@ -148,36 +148,40 @@ def standardize_names_with_pytaxon(
     return mapping
 
 
-def gbif_class_for_name(name: str, timeout_seconds: float = 20.0) -> str:
-    data = retry_call(
-        lambda: gbif_species.name_backbone(
-            scientificName=name, verbose=True, timeout=timeout_seconds
-        )
-    )
-    classification = data.get("classification", []) if isinstance(data, dict) else []
-    for node in classification:
-        if clean_text(node.get("rank", "")).upper() == "CLASS":
-            return clean_text(node.get("name", ""))
-    return ""
-
-
-def is_excluded_class(class_name: str) -> bool:
+def is_allowed_class(class_name: str, *, allow_empty: bool = False) -> bool:
     c = clean_text(class_name)
     if not c:
-        return False
-    if c.startswith("Tree "):
-        return True
-    return c in EXCLUDED_CLASSES
+        return allow_empty
+    return c in KEEP_CLASSES
+
+
+def ensure_wet_mass_g(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive wet_Mass_g from wet_Mass_kg when only kg is present (merged schema)."""
+    out = df.copy()
+    if "wet_Mass_kg" in out.columns:
+        kg = pd.to_numeric(out["wet_Mass_kg"], errors="coerce")
+        if "wet_Mass_g" not in out.columns:
+            out["wet_Mass_g"] = kg * 1000.0
+        else:
+            g = pd.to_numeric(out["wet_Mass_g"], errors="coerce")
+            out["wet_Mass_g"] = g.where(g.notna(), kg * 1000.0)
+        # Prefer historical column order: ... species, wet_Mass_g, wet_Mass_kg, BMR ...
+        cols = list(out.columns)
+        if "wet_Mass_g" in cols and "wet_Mass_kg" in cols:
+            cols = [c for c in cols if c != "wet_Mass_g"]
+            kg_idx = cols.index("wet_Mass_kg")
+            cols.insert(kg_idx, "wet_Mass_g")
+            out = out[cols]
+    return out
 
 
 def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Filter taxa in three steps: "
-            "(1) remove excluded classes, "
-            "(2) standardize names via pytaxon, "
-            "(3) remove excluded classes again using GBIF class lookup."
+            "Filter taxa in two steps: "
+            "(1) keep whitelist classes only, "
+            "(2) standardize names via pytaxon and write filtered outputs."
         )
     )
     parser.add_argument(
@@ -230,18 +234,21 @@ def main() -> None:
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     df = pd.read_csv(input_path)
+    df = ensure_wet_mass_g(df)
     rows_initial = len(df)
     for col in ["Genus", "species"]:
         if col not in df.columns:
             raise KeyError(f"Missing required column: {col}")
         df[col] = df[col].astype("string").str.strip()
 
-    # Step 0: delete blacklist classes first.
-    if "class" in df.columns:
-        df["class"] = df["class"].astype("string").str.strip()
-        df = df[~df["class"].map(lambda x: is_excluded_class(str(x)))].copy()
-    rows_after_blacklist = len(df)
-    print(f"Rows after blacklist class removal: {rows_after_blacklist}", flush=True)
+    # Step 0: keep whitelist classes only.
+    if "class" not in df.columns:
+        raise KeyError("Missing required column: class")
+    df["class"] = df["class"].astype("string").str.strip()
+    df = df[df["class"].map(lambda x: is_allowed_class(str(x)))].copy()
+    rows_after_whitelist = len(df)
+    print(f"Rows after whitelist class filter: {rows_after_whitelist}", flush=True)
+    print(f"Kept classes: {sorted(KEEP_CLASSES)}", flush=True)
 
     # Keep rows with explicit genus/species before species-level counting.
     df = df[df["Genus"].notna() & (df["Genus"] != "") & df["species"].notna() & (df["species"] != "")]
@@ -273,25 +280,11 @@ def main() -> None:
         flush=True,
     )
 
-    # Step 3: final filtering (blacklist classes by GBIF class as well)
-    unique_standard_names = sorted(df["taxon_name"].astype(str).unique().tolist())
-    class_map: dict[str, str] = {}
-    for idx, name in enumerate(unique_standard_names, start=1):
-        try:
-            class_map[name] = gbif_class_for_name(name, timeout_seconds=args.timeout_seconds)
-        except Exception:  # noqa: BLE001
-            class_map[name] = ""
-        if args.pause_seconds > 0:
-            time.sleep(args.pause_seconds)
-        if idx % 200 == 0:
-            print(f"[gbif] processed: {idx}/{len(unique_standard_names)}", flush=True)
-
-    filtered = df.copy()
-    # Safety guard: remove blacklist classes from original class and GBIF class.
-    if "class" in filtered.columns:
-        filtered = filtered[~filtered["class"].map(lambda x: is_excluded_class(str(x)))].copy()
-    gbif_class_series = filtered["taxon_name"].map(class_map).fillna("")
-    filtered = filtered[~gbif_class_series.map(lambda x: is_excluded_class(str(x)))].copy()
+    # Step 3: final filtering by original class whitelist.
+    # Do not drop rows when GBIF returns an alternate class name
+    # (e.g. Elasmobranchii vs Chondrichthyes); source class is authoritative here.
+    filtered = df[df["class"].map(lambda x: is_allowed_class(str(x)))].copy()
+    filtered = ensure_wet_mass_g(filtered)
 
     filtered_path.parent.mkdir(parents=True, exist_ok=True)
     filtered.to_csv(filtered_path, index=False, encoding="utf-8")
@@ -300,6 +293,11 @@ def main() -> None:
     print(
         "Rows removed: "
         f"{rows_standard - len(filtered)}",
+        flush=True,
+    )
+    print(
+        "Remaining classes: "
+        f"{sorted(filtered['class'].dropna().astype(str).unique().tolist())}",
         flush=True,
     )
 

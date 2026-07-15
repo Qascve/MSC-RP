@@ -1,6 +1,4 @@
 taxon_name
-Thermoanaerobacter kivui
-Halobacterium salinarum
 Squalus acanthias
 Chiloscyllium plagiosum
 Triakis semifasciata
@@ -623,6 +621,7 @@ Graphiurus ocularis
 Aplodontia rufa
 Marmota flaviventris
 Otospermophilus beecheyi
+Ictidomys tridecemlineatus
 Cynomys ludovicianus
 Ammospermophilus leucurus
 Tamias striatus
@@ -632,6 +631,7 @@ Tamias merriami
 Paraxerus cepapi
 Xerus princeps
 Xerus inauris
+Tamiasciurus hudsonicus
 Sciurus aberti
 Neotoma lepida
 Neotoma fuscipes
@@ -644,6 +644,7 @@ Peromyscus truei
 Scotinomys teguina
 Scotinomys xerampelinus
 Baiomys taylori
+Ochrotomys nuttalli
 Microtus agrestis
 Microtus pinetorum
 Microtus xanthognathus
@@ -762,6 +763,7 @@ Heterocephalus glaber
 Georychus capensis
 Bathyergus janetta
 Bathyergus suillus
+Fukomys damarensis
 Cryptomys hottentotus
 Heliophobius argenteocinereus
 Aconaemys fuscus
@@ -1177,7 +1179,6 @@ Pogonomyrmex maricopa
 Camponotus vafer
 Camponotus laevigatus
 Camponotus vicinus
-Camponotus sp.
 Cataglyphis bicolor
 Lasius niger
 Eciton hamatum
@@ -1186,6 +1187,7 @@ Leptogenys attenuata
 Apis mellifera
 Bombus terrestris
 Sphaeroderus stenostomus
+Calosoma chlorostictum
 Cicindela repanda
 Cicindela longilabris
 Amara quenseli
@@ -1243,7 +1245,7 @@ Xylophanes chiron
 Deilephila elpenor
 Syssphinx molina
 Eacles imperialis
-Automeris fieldi
+Automeris zugana
 Hylesia praeda
 Bombyx mori
 Ostrinia nubilalis
@@ -1336,12 +1338,5 @@ Octopus rubescens
 Japetella diaphana
 Enteroctopus dofleini
 Vampyroteuthis infernalis
-Atolla vanhoeffeni
+Atolla wyvillei
 Aglantha digitale
-Frontonia leucas
-Tetrahymena pyriformis
-Eimeria tenella
-Plasmodium knowlesi
-Plasmodium gallinaceum
-Trichomonas vaginalis
-Amoeba proteus

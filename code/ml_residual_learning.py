@@ -1,10 +1,12 @@
-
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
+import joblib
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,28 +24,30 @@ MODEL_NAMES = ["random_forest", "xgboost"]
 POWER_LAW_FEATURES = ["log_mass"]
 TAXONOMY_MODEL_FEATURES = ["Genus", "species"]
 TAXONOMY_METADATA_COLUMNS = ["class", "order", "family", "Genus", "species"]
-MIN_SPECIES_PER_CLASS = 2
 KEEP_CLASSES = {
     "Teleostei",
-    "Mammalia",
     "Insecta",
+    "Mammalia",
+    "Malacostraca",
     "Reptilia",
     "Amphibia",
-    "Malacostraca",
+    "Maxillopoda",
     "Aves",
-    "Cephalaspidomorphi",
     "Arachnida",
     "Chondrichthyes",
+    "Cephalaspidomorphi",
     "Chondrostei",
-    "Maxillopoda",
-    "Cephalopoda",
     "Branchiopoda",
-    "Dipnotetrapodomorpha",
-    "Myxini",
-    "Cladistei",
-    "Hydrozoa",
+    "Cephalopoda",
     "Sagittoidea",
+    "Hydrozoa",
+    "Dipnotetrapodomorpha",
+    "Ostracoda",
     "Scyphozoa",
+    "Myxini",
+    "Chilopoda",
+    "Cladistei",
+    "Gastropoda",
 }
 GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "all": None,
@@ -51,26 +55,11 @@ GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "Mammalia": "Mammalia",
     "Insecta": "Insecta",
 }
-BASE_COLUMNS = [
-    "class",
-    "order",
-    "family",
-    "Genus",
-    "species",
-    "wet_Mass_g",
-    "wet_Mass_kg",
-    TARGET,
-    "BMR_unit",
-    "temperature",
-    "temperature_unit",
-    "Reference",
-    "taxon_name",
-    "pc1",
-    "pc2",
-    "pc3",
-    "pc4",
-    "pc5",
-]
+FOLD_DIR_NAMES = {
+    "fold1": "f_1",
+    "fold2": "f_2",
+    "test": "test",
+}
 TREE_MODEL_FEATURES = [
     *TAXONOMY_MODEL_FEATURES,
     "log_mass",
@@ -81,6 +70,24 @@ TREE_MODEL_FEATURES = [
     "pc4",
     "pc5",
 ]
+
+EARLY_STOPPING_ROUNDS = 10
+XGB_MAX_ESTIMATORS = 1000
+INNER_VAL_FRAC = 0.2
+RF_FIXED_PARAMS = {
+    "n_estimators": 600,
+    "max_depth": 4,
+    "min_samples_leaf": 5,
+    "max_features": 1.0,
+}
+XGB_PARAM_GRID = {
+    "max_depth": [4, 6, 8, 10],
+    "learning_rate": [0.01, 0.05, 0.08],
+    "subsample": [0.6, 0.7],
+    "colsample_bytree": [0.6, 0.7],
+    "reg_lambda": [0.9, 2.0, 5.0],
+    "min_child_weight": [3, 5],
+}
 
 
 def find_root(marker: str = ".gitignore") -> Path:
@@ -93,149 +100,98 @@ def find_root(marker: str = ".gitignore") -> Path:
 
 
 def load_split_data(path: Path) -> pd.DataFrame:
+    """Load a fixed train/test CSV produced by split_train_test_bmr.py."""
     df = pd.read_csv(path)
-    required = ["taxon_name", *TREE_MODEL_FEATURES, TARGET, LOG_TARGET]
-    required = list(dict.fromkeys(required))
-    missing = [c for c in required if c not in df.columns]
+    keep_cols = list(
+        dict.fromkeys(
+            [
+                "taxon_name",
+                *TAXONOMY_METADATA_COLUMNS,
+                *TREE_MODEL_FEATURES,
+                TARGET,
+                LOG_TARGET,
+            ]
+        )
+    )
+    missing = [c for c in keep_cols if c not in df.columns]
     if missing:
         raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
 
-    out = df[required].copy()
+    out = df[keep_cols].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
-    categorical_features = TAXONOMY_MODEL_FEATURES
-    numeric_features = ["log_mass", "inv_kT", "pc1", "pc2", "pc3", "pc4", "pc5"]
-    for col in categorical_features:
+    for col in TAXONOMY_METADATA_COLUMNS:
         out[col] = out[col].astype("string").str.strip()
+    numeric_features = ["log_mass", "inv_kT", "pc1", "pc2", "pc3", "pc4", "pc5"]
     for col in numeric_features + [TARGET, LOG_TARGET]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out["taxon_name"] = out["taxon_name"].replace("", pd.NA)
-    for col in categorical_features:
+    for col in TAXONOMY_METADATA_COLUMNS:
         out[col] = out[col].replace("", pd.NA)
-    out = out.dropna(subset=required).copy()
+    out = out.dropna(subset=keep_cols).copy()
     out = out[(out["log_mass"].notna()) & (out["inv_kT"].notna()) & (out[TARGET] > 0)].copy()
     out = out[out["taxon_name"] != ""].copy()
-    return out.reset_index(drop=True)
-
-
-def load_full_data(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    missing = [c for c in BASE_COLUMNS if c not in df.columns]
-    if missing:
-        raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
-
-    out = df[BASE_COLUMNS].copy()
-    categorical_features = [*TAXONOMY_METADATA_COLUMNS, "taxon_name"]
-    numeric_features = ["wet_Mass_kg", TARGET, "temperature", "pc1", "pc2", "pc3", "pc4", "pc5"]
-    for col in categorical_features:
-        out[col] = out[col].astype("string").str.strip().replace("", pd.NA)
-    for col in numeric_features:
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    out = out.dropna(subset=BASE_COLUMNS).copy()
-    out = out[(out["wet_Mass_kg"] > 0) & (out[TARGET] > 0)].copy()
-    out = out[(out["temperature"] + 273.15) > 0].copy()
-    out["log_mass"] = np.log(out["wet_Mass_kg"].to_numpy())
-    out[LOG_TARGET] = np.log(out[TARGET].to_numpy())
-    temp_k = out["temperature"] + 273.15
-    out["inv_kT"] = 1.0 / (8.617e-5 * temp_k.to_numpy())
-    required = ["taxon_name", *TREE_MODEL_FEATURES, TARGET, LOG_TARGET]
-    required = list(dict.fromkeys(required))
-    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=required).copy()
     out = out[out["class"].isin(KEEP_CLASSES)].copy()
-    if out.empty:
-        raise ValueError("No rows left after applying the retained class filter.")
-    species_counts = out.groupby("class")["taxon_name"].nunique()
-    keep_classes_with_enough_species = species_counts[species_counts >= MIN_SPECIES_PER_CLASS].index
-    out = out[out["class"].isin(keep_classes_with_enough_species)].copy()
-    if out.empty:
-        raise ValueError(
-            f"No rows left after removing classes with fewer than {MIN_SPECIES_PER_CLASS} species."
-        )
     return out.reset_index(drop=True)
 
 
-def make_class_species_block_split(
-    df: pd.DataFrame,
-    test_species_ratio: float,
-    random_state: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    rng = np.random.default_rng(random_state)
-    out = df.copy().reset_index(drop=True)
-    out["split_row_id"] = np.arange(len(out), dtype=int)
+def discover_fold_splits(split_dir: Path, folds: list[str] | None = None) -> list[tuple[str, Path, Path]]:
+    """
+    Discover fixed fold CSVs under split_dir.
+    Prefers fold1/, fold2/, test/; falls back to top-level train.csv/test.csv as fold1.
+    """
+    wanted = folds if folds else ["fold1", "fold2", "test"]
+    found: list[tuple[str, Path, Path]] = []
+    for name in wanted:
+        train_path = split_dir / name / "train.csv"
+        test_path = split_dir / name / "test.csv"
+        if train_path.exists() and test_path.exists():
+            found.append((name, train_path, test_path))
 
-    test_species: set[str] = set()
-    summary_rows: list[dict[str, object]] = []
-    for class_name, class_df in out.groupby("class", sort=True):
-        species_counts = class_df.groupby("taxon_name").size().sort_values(ascending=False)
-        species_names = species_counts.index.astype(str).to_numpy()
-        n_species = len(species_names)
+    if found:
+        return found
 
-        if n_species < 2:
-            n_test_species = 0
-            picked_species: list[str] = []
-        else:
-            n_test_species = int(round(n_species * test_species_ratio))
-            n_test_species = max(1, min(n_species - 1, n_test_species))
-            shuffled = species_names.copy()
-            rng.shuffle(shuffled)
-            picked_species = sorted(shuffled[:n_test_species].tolist())
-            test_species.update(picked_species)
+    train_path = split_dir / "train.csv"
+    test_path = split_dir / "test.csv"
+    if train_path.exists() and test_path.exists() and (folds is None or "fold1" in wanted):
+        return [("fold1", train_path, test_path)]
 
-        test_rows = int(class_df["taxon_name"].astype(str).isin(picked_species).sum())
-        summary_rows.append(
-            {
-                "class": str(class_name),
-                "species_total": n_species,
-                "species_train": n_species - n_test_species,
-                "species_test": n_test_species,
-                "rows_total": len(class_df),
-                "rows_train": len(class_df) - test_rows,
-                "rows_test": test_rows,
-            }
-        )
+    raise FileNotFoundError(
+        f"No fixed split CSVs found under {split_dir}. "
+        "Expected fold1/, fold2/, and test/ with train.csv & test.csv. "
+        "Run: python code/split_train_test_bmr.py"
+    )
 
-    is_test = out["taxon_name"].astype(str).isin(test_species)
-    train_df = out[~is_test].drop(columns=["split_row_id"]).reset_index(drop=True)
-    test_df = out[is_test].drop(columns=["split_row_id"]).reset_index(drop=True)
-    if train_df.empty or test_df.empty:
-        raise RuntimeError("Species-block split failed: empty train or test set.")
-    leaked_species = set(train_df["taxon_name"].astype(str)).intersection(set(test_df["taxon_name"].astype(str)))
-    if leaked_species:
-        raise RuntimeError(f"Species leakage detected in block split: {sorted(leaked_species)[:5]}")
-    return train_df, test_df, pd.DataFrame(summary_rows).sort_values("rows_total", ascending=False)
+
+def assert_no_species_leakage(train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    leaked = set(train_df["taxon_name"].astype(str)).intersection(
+        set(test_df["taxon_name"].astype(str))
+    )
+    if leaked:
+        raise RuntimeError(f"Species leakage detected in fixed split: {sorted(leaked)[:5]}")
 
 
 def fit_alpha_three_quarter(log_mass: np.ndarray, log_bmr: np.ndarray) -> float:
     return float(np.mean(log_bmr - 0.75 * log_mass))
 
 
-def build_residual_feature_frames(
-    train_df: pd.DataFrame, test_df: pd.DataFrame, alpha: float, model_features: list[str]
-) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
-    mass_col = POWER_LAW_FEATURES[0]
-    train_mass = train_df[mass_col].to_numpy()
-    test_mass = test_df[mass_col].to_numpy()
-    train_log_base = alpha + 0.75 * train_mass
-    test_log_base = alpha + 0.75 * test_mass
-
-    categorical_features = TAXONOMY_MODEL_FEATURES
-    tree_categorical_features = [col for col in model_features if col in categorical_features]
-    train_raw = train_df[model_features].reset_index(drop=True).copy()
-    test_raw = test_df[model_features].reset_index(drop=True).copy()
-    merged_raw = pd.concat([train_raw, test_raw], axis=0, ignore_index=True)
-    merged_encoded = pd.get_dummies(
-        merged_raw,
-        columns=tree_categorical_features,
-        prefix=tree_categorical_features,
-        dtype=float,
-    )
-
-    split_idx = len(train_raw)
-    X_train_res = merged_encoded.iloc[:split_idx].copy()
-    X_test_res = merged_encoded.iloc[split_idx:].copy()
-    X_train_res["base_log_pred"] = train_log_base
-    X_test_res["base_log_pred"] = test_log_base
-    return X_train_res, X_test_res, train_log_base, test_log_base
+def species_block_train_val_split(
+    train_df: pd.DataFrame, val_frac: float, random_state: int
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Hold out a fraction of training species for inner validation (no row leakage)."""
+    species = train_df["taxon_name"].astype(str).unique()
+    if len(species) < 3:
+        raise RuntimeError("Need at least 3 training species for inner val split.")
+    rng = np.random.default_rng(random_state)
+    order = rng.permutation(species)
+    n_val = max(1, int(round(len(order) * val_frac)))
+    n_val = min(n_val, len(order) - 1)
+    val_species = set(order[:n_val].tolist())
+    is_val = train_df["taxon_name"].astype(str).isin(val_species)
+    fit_df = train_df.loc[~is_val].reset_index(drop=True)
+    val_df = train_df.loc[is_val].reset_index(drop=True)
+    if fit_df.empty or val_df.empty:
+        raise RuntimeError("Inner species-block split produced an empty fit/val set.")
+    return fit_df, val_df
 
 
 def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
@@ -244,135 +200,548 @@ def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
     class_weights = compute_class_weight(
         class_weight="balanced",
         classes=unique_classes,
-        y=classes)
+        y=classes,
+    )
     weight_map = dict(zip(unique_classes, class_weights))
-    sample_weight = np.array([weight_map[c] for c in classes], dtype=float)
-    return sample_weight
+    return np.array([weight_map[c] for c in classes], dtype=float)
 
 
-def train_and_predict(
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
+def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+
+def _params_key(params: dict) -> tuple:
+    return tuple(sorted((k, params[k]) for k in params))
+
+
+def _cartesian_param_dicts(grid: dict) -> list[dict]:
+    keys = list(grid.keys())
+    combos: list[dict] = [{}]
+    for key in keys:
+        combos = [{**base, key: val} for base in combos for val in grid[key]]
+    return combos
+
+
+def encode_train_frame(
+    df: pd.DataFrame, alpha: float, feature_columns: list[str] | None = None
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    """Encode residual features for one frame; optionally align to saved columns."""
+    cat = [c for c in TREE_MODEL_FEATURES if c in TAXONOMY_MODEL_FEATURES]
+    raw = df[TREE_MODEL_FEATURES].reset_index(drop=True).copy()
+    encoded = pd.get_dummies(raw, columns=cat, prefix=cat, dtype=float)
+    base = alpha + 0.75 * df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float)
+    if feature_columns is not None:
+        encoded = encoded.reindex(columns=feature_columns, fill_value=0.0)
+    residual = df[LOG_TARGET].to_numpy(dtype=float) - base
+    return encoded, residual, base
+
+
+def fit_xgb_with_early_stopping(
+    X_fit: pd.DataFrame,
+    y_fit: np.ndarray,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    params: dict,
+    sample_weight: np.ndarray | None,
+    sample_weight_val: np.ndarray | None,
     random_state: int,
-    balance_classes: bool = False,
-) -> tuple[dict[str, np.ndarray], dict[str, object], dict[str, pd.DataFrame]]:
-    y_train = train_df[TARGET].to_numpy()
-    log_y_train = train_df[LOG_TARGET].to_numpy()
-    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), log_y_train)
-    residual_train = log_y_train - (alpha + 0.75 * train_df[POWER_LAW_FEATURES[0]].to_numpy())
-    sample_weight = make_class_balanced_sample_weight(train_df) if balance_classes else None
-
-    X_train_rf, X_test_rf, _rf_train_base, rf_test_base = build_residual_feature_frames(
-        train_df, test_df, alpha, TREE_MODEL_FEATURES
-    )
-    X_train_xgb, X_test_xgb, _xgb_train_base, xgb_test_base = build_residual_feature_frames(
-        train_df, test_df, alpha, TREE_MODEL_FEATURES
-    )
-
-    rf = RandomForestRegressor(
-        n_estimators=600,
-        max_depth=4,
-        min_samples_leaf=5,
-        random_state=random_state,
-        n_jobs=-1,
-    )
-    rf.fit(X_train_rf, residual_train, sample_weight=sample_weight)
-    yhat_rf = np.exp(rf_test_base + rf.predict(X_test_rf))
-
+) -> tuple[XGBRegressor, int, float, list[float]]:
     xgb = XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=6000,
-        learning_rate=0.01,
-        max_depth=8,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_lambda=1.0,
+        n_estimators=XGB_MAX_ESTIMATORS,
+        learning_rate=params["learning_rate"],
+        max_depth=params["max_depth"],
+        subsample=params["subsample"],
+        colsample_bytree=params["colsample_bytree"],
+        reg_lambda=params["reg_lambda"],
+        min_child_weight=params["min_child_weight"],
+        random_state=random_state,
+        n_jobs=-1,
+        eval_metric="rmse",
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+    )
+    fit_kwargs: dict = {
+        "eval_set": [(X_val, y_val)],
+        "verbose": False,
+    }
+    if sample_weight is not None:
+        fit_kwargs["sample_weight"] = sample_weight
+    if sample_weight_val is not None:
+        fit_kwargs["sample_weight_eval_set"] = [sample_weight_val]
+    xgb.fit(X_fit, y_fit, **fit_kwargs)
+    best_n = int(getattr(xgb, "best_iteration", XGB_MAX_ESTIMATORS - 1)) + 1
+    best_score = float(getattr(xgb, "best_score", rmse(y_val, xgb.predict(X_val))))
+    evals = xgb.evals_result().get("validation_0", {}).get("rmse", [])
+    history = [float(v) for v in evals]
+    return xgb, best_n, best_score, history
+
+
+def tune_models_on_train(
+    train_df: pd.DataFrame,
+    random_state: int,
+    balance_classes: bool,
+) -> dict:
+    """Exhaustively tune XGB; train RF once with fixed parameters."""
+    fit_df, val_df = species_block_train_val_split(
+        train_df, val_frac=INNER_VAL_FRAC, random_state=random_state
+    )
+    alpha = fit_alpha_three_quarter(
+        train_df[POWER_LAW_FEATURES[0]].to_numpy(),
+        train_df[LOG_TARGET].to_numpy(dtype=float),
+    )
+
+    # Feature columns from the fit split (val may have unseen categories → zeros).
+    X_fit, residual_fit, _ = encode_train_frame(fit_df, alpha)
+    feature_columns = list(X_fit.columns)
+    X_val, residual_val, _ = encode_train_frame(val_df, alpha, feature_columns)
+    sw_fit = make_class_balanced_sample_weight(fit_df) if balance_classes else None
+    sw_val = make_class_balanced_sample_weight(val_df) if balance_classes else None
+
+    xgb_param_sets = _cartesian_param_dicts(XGB_PARAM_GRID)
+    n_combinations = len(xgb_param_sets)
+    if n_combinations == 0:
+        raise ValueError("XGB_PARAM_GRID produced no combinations.")
+    xgb_keys = {_params_key(p) for p in xgb_param_sets}
+    if len(xgb_keys) != n_combinations:
+        raise RuntimeError("Hyperparameter search produced duplicate trials.")
+
+    xgb_trials: list[dict] = []
+    best_xgb: dict | None = None
+    best_xgb_hist: list[float] = []
+
+    print(
+        f"  XGB exhaustive grid search: {n_combinations} combinations, "
+        f"inner species val={val_df['taxon_name'].nunique()} species / {len(val_df)} rows",
+        flush=True,
+    )
+    for trial, xgb_params in enumerate(xgb_param_sets):
+        _, xgb_n, xgb_score, xgb_hist = fit_xgb_with_early_stopping(
+            X_fit,
+            residual_fit,
+            X_val,
+            residual_val,
+            xgb_params,
+            sw_fit,
+            sw_val,
+            random_state,
+        )
+        xgb_row = {**xgb_params, "n_estimators": xgb_n, "val_rmse": xgb_score, "trial": trial}
+        xgb_trials.append(xgb_row)
+        if best_xgb is None or xgb_score < best_xgb["val_rmse"]:
+            best_xgb = dict(xgb_row)
+            best_xgb_hist = list(xgb_hist)
+        if (trial + 1) % 10 == 0 or trial == 0:
+            print(
+                f"    combination {trial + 1}/{n_combinations}: "
+                f"best_so_far val_rmse={best_xgb['val_rmse']:.4f} "
+                f"(trial={int(best_xgb['trial']) + 1})",
+                flush=True,
+            )
+
+    assert best_xgb is not None
+
+    # XGB uses the winning trial; RF uses one fixed configuration without tuning.
+    xgb_n_final = int(best_xgb["n_estimators"])
+    xgb_hist = list(best_xgb_hist)
+
+    # Full-train feature space (may include categories only in former val species).
+    X_all, residual_all, _ = encode_train_frame(train_df, alpha)
+    feature_columns = list(X_all.columns)
+    sw_all = make_class_balanced_sample_weight(train_df) if balance_classes else None
+
+    rf_full = RandomForestRegressor(
+        **RF_FIXED_PARAMS,
         random_state=random_state,
         n_jobs=-1,
     )
-    xgb.fit(X_train_xgb, residual_train, sample_weight=sample_weight)
-    yhat_xgb = np.exp(xgb_test_base + xgb.predict(X_test_xgb))
+    rf_full.fit(X_all, residual_all, sample_weight=sw_all)
 
-    preds = {
-        "random_forest": yhat_rf,
-        "xgboost": yhat_xgb,
-    }
-    models = {"random_forest": rf, "xgboost": xgb}
-    shap_inputs = {"random_forest": X_test_rf, "xgboost": X_test_xgb}
-    return preds, models, shap_inputs
-
-
-def evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    return {
-        "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
-        "mae": float(mean_absolute_error(y_true, y_pred)),
-        "r2": float(r2_score(y_true, y_pred)),
-    }
-
-
-def save_loss_curve(
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    out_dir: Path,
-    random_state: int,
-    balance_classes: bool,
-) -> pd.DataFrame:
-    log_y_train = train_df[LOG_TARGET].to_numpy()
-    alpha = fit_alpha_three_quarter(train_df[POWER_LAW_FEATURES[0]].to_numpy(), log_y_train)
-    X_train_res, _X_test_res, train_log_base, _test_log_base = build_residual_feature_frames(
-        train_df, test_df, alpha, TREE_MODEL_FEATURES
-    )
-    residual_train = log_y_train - train_log_base
-    sample_weight = make_class_balanced_sample_weight(train_df) if balance_classes else None
-
-    xgb_curve = XGBRegressor(
+    xgb_full = XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=600,
-        learning_rate=0.05,
-        max_depth=4,
-        subsample=0.9,
-        colsample_bytree=0.9,
-        reg_lambda=1.0,
+        n_estimators=xgb_n_final,
+        learning_rate=best_xgb["learning_rate"],
+        max_depth=best_xgb["max_depth"],
+        subsample=best_xgb["subsample"],
+        colsample_bytree=best_xgb["colsample_bytree"],
+        reg_lambda=best_xgb["reg_lambda"],
+        min_child_weight=best_xgb["min_child_weight"],
         random_state=random_state,
         n_jobs=-1,
         eval_metric="rmse",
     )
-    xgb_curve.fit(
-        X_train_res,
-        residual_train,
-        sample_weight=sample_weight,
-        eval_set=[(X_train_res, residual_train)],
-        sample_weight_eval_set=[sample_weight] if sample_weight is not None else None,
-        verbose=False,
+    xgb_full.fit(X_all, residual_all, sample_weight=sw_all, verbose=False)
+
+    print(
+        "  RF fixed params (no HP search): "
+        f"{RF_FIXED_PARAMS}",
+        flush=True,
+    )
+    print(
+        f"  Best XGB trial={best_xgb['trial']} val_rmse={best_xgb['val_rmse']:.4f} "
+        f"n_estimators={xgb_n_final} "
+        f"params={{max_depth={best_xgb['max_depth']}, lr={best_xgb['learning_rate']}}}",
+        flush=True,
     )
 
-    evals = xgb_curve.evals_result()
-    train_rmse = np.asarray(evals["validation_0"]["rmse"], dtype=float)
-    lc_df = pd.DataFrame(
-        {
-            "iteration": np.arange(1, len(train_rmse) + 1, dtype=int),
-            "train_rmse": train_rmse,
+    xgb_score = float(best_xgb["val_rmse"])
+
+    return {
+        "models": {"random_forest": rf_full, "xgboost": xgb_full},
+        "alpha": float(alpha),
+        "feature_columns": feature_columns,
+        "best_params": {
+            "random_forest": {
+                **RF_FIXED_PARAMS,
+                "tuned": False,
+            },
+            "xgboost": {
+                "trial": int(best_xgb["trial"]),
+                "max_depth": int(best_xgb["max_depth"]),
+                "learning_rate": float(best_xgb["learning_rate"]),
+                "subsample": float(best_xgb["subsample"]),
+                "colsample_bytree": float(best_xgb["colsample_bytree"]),
+                "reg_lambda": float(best_xgb["reg_lambda"]),
+                "min_child_weight": int(best_xgb["min_child_weight"]),
+                "n_estimators": xgb_n_final,
+                "search_val_rmse": xgb_score,
+            },
+        },
+        "search_trials": {
+            "xgboost": pd.DataFrame(xgb_trials),
+        },
+        "loss_curves": {
+            "xgboost": xgb_hist,
+        },
+        "inner_val_species": int(val_df["taxon_name"].nunique()),
+        "inner_val_rows": int(len(val_df)),
+        "fold_tag": None,
+    }
+
+
+def save_model_bundle(bundle: dict, model_dir: Path) -> Path:
+    """Save RF and XGB separately for this fold."""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    for obsolete in ("model.joblib",):
+        path = model_dir / obsolete
+        if path.exists():
+            path.unlink()
+
+    for name in MODEL_NAMES:
+        joblib.dump(bundle["models"][name], model_dir / f"{name}.joblib")
+    meta = {
+        "alpha": bundle["alpha"],
+        "feature_columns": bundle["feature_columns"],
+        "best_params": bundle["best_params"],
+        "inner_val_species": bundle["inner_val_species"],
+        "inner_val_rows": bundle["inner_val_rows"],
+        "model_features": TREE_MODEL_FEATURES,
+        "fold_tag": bundle.get("fold_tag"),
+    }
+    (model_dir / "meta.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    # Only XGB has HP-search records and an early-stopping curve.
+    old_rf_log = model_dir / "hp_search_random_forest.csv"
+    if old_rf_log.exists():
+        old_rf_log.unlink()
+    bundle["search_trials"]["xgboost"].to_csv(
+        model_dir / "hp_search_xgboost.csv", index=False, encoding="utf-8"
+    )
+    hist = bundle["loss_curves"].get("xgboost", [])
+    pd.DataFrame(
+        {"iteration": np.arange(1, len(hist) + 1, dtype=int), "val_rmse": hist}
+    ).to_csv(model_dir / "loss_curve.csv", index=False, encoding="utf-8")
+    for leftover in model_dir.glob("loss_curve_*.csv"):
+        leftover.unlink()
+    print(
+        f"  Saved RF and XGB separately -> {model_dir / 'random_forest.joblib'}, "
+        f"{model_dir / 'xgboost.joblib'}",
+        flush=True,
+    )
+    return model_dir
+
+
+def write_hp_search_trials_csv(
+    benchmark_dir: Path,
+    fold_tag: str,
+    bundle: dict,
+    reset: bool = False,
+) -> Path:
+    """
+    Write/append all exhaustive XGB combinations + inner-val RMSE.
+    RF is omitted because it uses fixed parameters and is not tuned.
+
+    Per-fold files are authoritative. If a CSV is open and locked on Windows,
+    write an ``*_unlocked.csv`` fallback and continue instead of losing the
+    completed grid search.
+    """
+    def write_with_fallback(df: pd.DataFrame, path: Path) -> Path:
+        try:
+            df.to_csv(path, index=False, encoding="utf-8")
+            return path
+        except PermissionError:
+            fallback = path.with_name(f"{path.stem}_unlocked{path.suffix}")
+            df.to_csv(fallback, index=False, encoding="utf-8")
+            print(
+                f"  Warning: {path} is locked; wrote {fallback} instead.",
+                flush=True,
+            )
+            return fallback
+
+    benchmark_dir.mkdir(parents=True, exist_ok=True)
+    out_path = benchmark_dir / "hp_search_trials.csv"
+    rows: list[dict] = []
+    for model_name, trials_df in bundle["search_trials"].items():
+        best_trial = int(bundle["best_params"][model_name]["trial"])
+        for _, rec in trials_df.iterrows():
+            row = {"fold": fold_tag, "model": model_name}
+            row.update({k: rec[k] for k in trials_df.columns})
+            is_family_best = int(int(rec["trial"]) == best_trial)
+            row["is_best"] = is_family_best
+            rows.append(row)
+    new_df = pd.DataFrame(rows)
+
+    # Save authoritative per-fold outputs before touching the combined CSV.
+    fold_path = write_with_fallback(
+        new_df, benchmark_dir / f"hp_search_trials_{fold_tag}.csv"
+    )
+    best_df = new_df.loc[new_df["is_best"] == 1].copy()
+    best_path = write_with_fallback(
+        best_df, benchmark_dir / f"xgb_best_params_{fold_tag}.csv"
+    )
+
+    model_dir = benchmark_dir / "all" / fold_tag / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    write_with_fallback(best_df, model_dir / "xgb_best_params.csv")
+
+    # The combined CSV is convenient but non-authoritative.
+    if reset or not out_path.exists():
+        combined_df = new_df
+    else:
+        try:
+            old_df = pd.read_csv(out_path)
+            keep = (
+                old_df[old_df["fold"].astype(str) != str(fold_tag)]
+                if "fold" in old_df.columns
+                else old_df.iloc[0:0]
+            )
+            combined_df = pd.concat([keep, new_df], ignore_index=True)
+        except PermissionError:
+            combined_df = new_df
+    actual_out_path = write_with_fallback(combined_df, out_path)
+
+    print(
+        f"  Wrote XGB exhaustive search ({len(new_df)} rows) -> {fold_path}",
+        flush=True,
+    )
+    print(
+        f"  Wrote best XGB parameters for {fold_tag} -> {best_path}",
+        flush=True,
+    )
+    return actual_out_path
+
+
+def fold_model_eval_rmse(
+    benchmark_dir: Path, fold_tag: str, model_name: str
+) -> float:
+    """Return this model family's outer-fold evaluation RMSE."""
+    metrics_path = benchmark_dir / "all" / fold_tag / "benchmark_metrics.csv"
+    if metrics_path.exists():
+        metrics = pd.read_csv(metrics_path)
+        hit = metrics.loc[metrics["model"] == model_name, "rmse"]
+        if not hit.empty and np.isfinite(hit.iloc[0]):
+            return float(hit.iloc[0])
+    raise FileNotFoundError(
+        f"Missing {model_name} fold metric in {metrics_path}; rerun fold1/fold2."
+    )
+
+
+def select_best_models_from_cv_folds(
+    benchmark_dir: Path, source_folds: list[str] | None = None
+) -> dict[str, dict]:
+    """
+    Independently pick the better saved RF and XGB from f_1/f_2.
+    The held-out test set is never used for selection.
+    """
+    source_folds = source_folds or ["f_1", "f_2"]
+    selected: dict[str, dict] = {}
+    for model_name in MODEL_NAMES:
+        best: dict | None = None
+        for fold_tag in source_folds:
+            model_dir = benchmark_dir / "all" / fold_tag / "models"
+            model_path = model_dir / f"{model_name}.joblib"
+            if not model_path.exists():
+                raise FileNotFoundError(
+                    f"Missing saved {model_name} for {fold_tag}: {model_path}. "
+                    "Rerun fold1/fold2 with the updated script."
+                )
+            score = fold_model_eval_rmse(benchmark_dir, fold_tag, model_name)
+            if best is None or score < best["score"]:
+                best = {
+                    "fold": fold_tag,
+                    "model_name": model_name,
+                    "score": score,
+                    "model_dir": model_dir,
+                }
+        assert best is not None
+        selected[model_name] = best
+        print(
+            f"  test uses {model_name} from {best['fold']} "
+            f"(fold eval RMSE={best['score']:.4f})",
+            flush=True,
+        )
+    return selected
+
+
+def save_test_model_selection(
+    selection: dict[str, dict], model_dir: Path
+) -> Path:
+    """Record the independently selected RF and XGB source folds."""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        name: {
+            "source_fold": info["fold"],
+            "source_model_dir": str(info["model_dir"]),
+            "selection_rmse": info["score"],
         }
-    )
-    lc_df.to_csv(out_dir / "loss_curve_data.csv", index=False, encoding="utf-8")
+        for name, info in selection.items()
+    }
+    out = model_dir / "selection.json"
+    out.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
 
+
+def load_model_bundle(model_dir: Path) -> dict:
+    """Load both separately persisted model families from one fold."""
+    meta_path = model_dir / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Missing model meta: {meta_path}")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    models = {}
+    for name in MODEL_NAMES:
+        model_path = model_dir / f"{name}.joblib"
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Missing {name} model: {model_path}. Rerun this fold."
+            )
+        models[name] = joblib.load(model_path)
+    return {
+        "models": models,
+        "alpha": float(meta["alpha"]),
+        "feature_columns": list(meta["feature_columns"]),
+        "best_params": meta.get("best_params", {}),
+        "model_features": list(meta.get("model_features", TREE_MODEL_FEATURES)),
+    }
+
+
+def load_selected_models(
+    selection: dict[str, dict],
+) -> dict[str, dict]:
+    """Load RF/XGB from their independently selected source folds."""
+    return {
+        name: load_model_bundle(info["model_dir"])
+        for name, info in selection.items()
+    }
+
+
+def predict_selected_models(
+    selected_bundles: dict[str, dict], df: pd.DataFrame
+) -> tuple[dict[str, np.ndarray], dict[str, pd.DataFrame], dict[str, object]]:
+    preds: dict[str, np.ndarray] = {}
+    shap_inputs: dict[str, pd.DataFrame] = {}
+    models: dict[str, object] = {}
+    for name in MODEL_NAMES:
+        bundle = selected_bundles[name]
+        single_bundle = {
+            **bundle,
+            "models": {name: bundle["models"][name]},
+        }
+        p, x = predict_log_bmr(single_bundle, df)
+        preds[name] = p[name]
+        shap_inputs[name] = x[name]
+        models[name] = bundle["models"][name]
+    return preds, shap_inputs, models
+
+
+def predict_log_bmr(
+    bundle: dict, df: pd.DataFrame
+) -> tuple[dict[str, np.ndarray], dict[str, pd.DataFrame]]:
+    """Predict log_BMR with a loaded bundle; also return residual feature frames for SHAP."""
+    alpha = bundle["alpha"]
+    feature_columns = bundle["feature_columns"]
+    model_features = bundle.get("model_features", TREE_MODEL_FEATURES)
+    cat = [c for c in model_features if c in TAXONOMY_MODEL_FEATURES]
+    raw = df[model_features].reset_index(drop=True).copy()
+    encoded = pd.get_dummies(raw, columns=cat, prefix=cat, dtype=float)
+    base = alpha + 0.75 * df[POWER_LAW_FEATURES[0]].to_numpy(dtype=float)
+    X = encoded.reindex(columns=feature_columns, fill_value=0.0)
+
+    preds: dict[str, np.ndarray] = {}
+    shap_inputs: dict[str, pd.DataFrame] = {}
+    for name, model in bundle["models"].items():
+        residual_hat = np.asarray(model.predict(X), dtype=float)
+        preds[name] = base + residual_hat
+        shap_inputs[name] = X
+    return preds, shap_inputs
+
+
+def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
+    """Evaluate on log_BMR only."""
+    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
+    y_true_log = np.asarray(y_true_log, dtype=float)[mask]
+    y_pred_log = np.asarray(y_pred_log, dtype=float)[mask]
+    if len(y_true_log) == 0:
+        return {"rmse": np.nan, "mae": np.nan, "r2": np.nan}
+    return {
+        "rmse": float(np.sqrt(mean_squared_error(y_true_log, y_pred_log))),
+        "mae": float(mean_absolute_error(y_true_log, y_pred_log)),
+        "r2": float(r2_score(y_true_log, y_pred_log)),
+    }
+
+
+def save_loss_curve_from_bundle(model_dir: Path, out_dir: Path) -> None:
+    """Copy/plot the XGB early-stopping validation loss curve."""
+    src = model_dir / "loss_curve.csv"
+    if not src.exists():
+        # Backward compatibility
+        for alt in ("loss_curve_xgboost.csv", "loss_curve_random_forest.csv"):
+            if (model_dir / alt).exists():
+                src = model_dir / alt
+                break
+        else:
+            return
+    lc_df = pd.read_csv(src)
+    lc_df.to_csv(out_dir / "loss_curve_data.csv", index=False, encoding="utf-8")
     sns.set_theme(style="whitegrid")
     plt.figure(figsize=(9, 6))
-    plt.plot(lc_df["iteration"], lc_df["train_rmse"], label="xgboost_train_rmse", linewidth=2)
-    plt.xlabel("Boosting Iteration")
-    plt.ylabel("RMSE (Residual Space)")
-    plt.title("XGBoost Training Loss Curve")
+    ycol = "val_rmse" if "val_rmse" in lc_df.columns else lc_df.columns[-1]
+    plt.plot(lc_df["iteration"], lc_df[ycol], label="val_rmse", linewidth=2)
+    plt.xlabel("XGB boosting iteration")
+    plt.ylabel("RMSE (log_BMR residual)")
+    plt.title("XGBoost Early-Stopping Validation Loss")
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_dir / "loss_curve.png", dpi=160)
     plt.close()
-    return lc_df
 
 
-def save_pred_and_residual_plots(out_dir: Path, pred_df: pd.DataFrame) -> None:
+def prediction_model_cols(pred_df: pd.DataFrame) -> list[str]:
+    """Model prediction columns present in a prediction frame."""
+    cols = [c for c in MODEL_NAMES if c in pred_df.columns]
+    if cols:
+        return cols
+    if "y_pred" in pred_df.columns:
+        return ["y_pred"]
+    raise KeyError("No model prediction columns found in prediction frame.")
+
+
+def save_pred_and_residual_plots(
+    out_dir: Path, pred_df: pd.DataFrame, model_names: list[str] | None = None
+) -> None:
     sns.set_theme(style="whitegrid")
+    model_names = model_names or prediction_model_cols(pred_df)
 
-    for model in MODEL_NAMES:
+    for model in model_names:
         plt.figure(figsize=(8, 7))
         plt.scatter(
             pred_df["y_true"],
@@ -385,25 +754,22 @@ def save_pred_and_residual_plots(out_dir: Path, pred_df: pd.DataFrame) -> None:
         min_v = float(min(pred_df["y_true"].min(), pred_df[model].min()))
         max_v = float(max(pred_df["y_true"].max(), pred_df[model].max()))
         plt.plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1)
-        plt.xscale("log")
-        plt.yscale("log")
-        plt.xlabel("Observed BMR (W)")
-        plt.ylabel("Predicted BMR (W)")
-        plt.title(f"Observed vs Predicted ({model})")
+        plt.xlabel("Observed log_BMR")
+        plt.ylabel("Predicted log_BMR")
+        plt.title(f"Observed vs Predicted log_BMR ({model})")
         plt.legend()
         plt.tight_layout()
         plt.savefig(out_dir / f"observed_vs_predicted_scatter_{model}.png", dpi=160)
         plt.close()
 
     plt.figure(figsize=(8, 7))
-    for model in MODEL_NAMES:
+    for model in model_names:
         residual = pred_df["y_true"] - pred_df[model]
         plt.scatter(pred_df[model], residual, s=14, alpha=0.45, label=model)
     plt.axhline(0.0, color="k", linestyle="--", linewidth=1)
-    plt.xscale("log")
-    plt.xlabel("Predicted BMR (W)")
-    plt.ylabel("Residual (Observed - Predicted)")
-    plt.title("Residual Plot")
+    plt.xlabel("Predicted log_BMR")
+    plt.ylabel("Residual (log Observed - log Predicted)")
+    plt.title("Residual Plot (log_BMR)")
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_dir / "residual_plot.png", dpi=160)
@@ -411,17 +777,28 @@ def save_pred_and_residual_plots(out_dir: Path, pred_df: pd.DataFrame) -> None:
 
 
 def save_performance_boxplot(
-    out_dir: Path, y_true: np.ndarray, pred_df: pd.DataFrame, random_state: int
+    out_dir: Path,
+    y_true: np.ndarray,
+    pred_df: pd.DataFrame,
+    random_state: int,
+    model_names: list[str] | None = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(random_state)
     n_boot = 200
     rows: list[dict[str, float | str]] = []
+    y_true = np.asarray(y_true, dtype=float)
     n = len(y_true)
-    for model in MODEL_NAMES:
-        y_pred = pred_df[model].to_numpy()
+    model_names = model_names or prediction_model_cols(pred_df)
+    for model in model_names:
+        y_pred = pd.to_numeric(pred_df[model], errors="coerce").to_numpy(dtype=float)
         for b in range(n_boot):
             idx = rng.integers(0, n, size=n)
-            rmse_b = float(np.sqrt(mean_squared_error(y_true[idx], y_pred[idx])))
+            yt = y_true[idx]
+            yp = y_pred[idx]
+            mask = np.isfinite(yt) & np.isfinite(yp)
+            if int(mask.sum()) < 2:
+                continue
+            rmse_b = float(np.sqrt(mean_squared_error(yt[mask], yp[mask])))
             rows.append({"model": model, "bootstrap_id": b, "rmse": rmse_b})
     perf_df = pd.DataFrame(rows)
     perf_df.to_csv(out_dir / "performance_boxplot_data.csv", index=False, encoding="utf-8")
@@ -430,8 +807,8 @@ def save_performance_boxplot(
     plt.figure(figsize=(9, 6))
     sns.boxplot(data=perf_df, x="model", y="rmse")
     plt.xlabel("Model")
-    plt.ylabel("Bootstrap RMSE")
-    plt.title("Model Performance Boxplot")
+    plt.ylabel("Bootstrap RMSE (log_BMR)")
+    plt.title("Model Performance Boxplot (log_BMR)")
     plt.tight_layout()
     plt.savefig(out_dir / "model_performance_boxplot.png", dpi=160)
     plt.close()
@@ -445,19 +822,22 @@ def save_shap_outputs(
     shap_inputs: dict[str, pd.DataFrame],
 ) -> None:
     def save_current_figure(path: Path) -> None:
-        try:
-            plt.savefig(path, dpi=160)
-        except OSError as exc:
-            print(f"Warning: could not save SHAP plot {path}: {exc}")
+        fig = plt.gcf()
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
 
-    shap_candidates = ["random_forest", "xgboost"]
-    best = (
-        metrics_df[metrics_df["model"].isin(shap_candidates)]
-        .sort_values("rmse", ascending=True)
-        .iloc[0]["model"]
-    )
+    shap_candidates = list(models.keys()) or ["random_forest", "xgboost"]
+    subset = metrics_df[metrics_df["model"].isin(shap_candidates)]
+    if subset.empty:
+        subset = metrics_df
+    best = subset.sort_values("rmse").iloc[0]["model"]
+    if best not in models:
+        best = next(iter(models))
     model = models[best]
     X_test_res = shap_inputs[best]
+    if X_test_res.empty:
+        print(f"  Skip SHAP for {out_dir.name}: empty feature frame.")
+        return
 
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(X_test_res)
@@ -483,51 +863,109 @@ def save_shap_outputs(
     plt.close()
 
 
-def run_single_group(
-    group_name: str,
-    train_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    out_dir: Path,
-    random_state: int,
-    balance_classes: bool,
-) -> pd.DataFrame:
-    out_dir.mkdir(parents=True, exist_ok=True)
+def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
+    """Symmetric accuracy on log_BMR: exp(-|pred - true|)."""
+    y_true_log = np.asarray(y_true_log, dtype=float)
+    y_pred_log = np.asarray(y_pred_log, dtype=float)
+    out = np.full(len(y_true_log), np.nan, dtype=float)
+    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
+    out[mask] = np.exp(-np.abs(y_pred_log[mask] - y_true_log[mask]))
+    return np.clip(out, 0.0, 1.0)
 
-    preds, models, shap_inputs = train_and_predict(
-        train_df=train_df,
-        test_df=test_df,
-        random_state=random_state,
-        balance_classes=balance_classes,
+
+def build_species_accuracy_table(
+    pred_df: pd.DataFrame,
+    model_cols: list[str],
+) -> pd.DataFrame:
+    """One row per taxon_name; columns are per-model mean accuracy across rows."""
+    work = pred_df.copy()
+    work["taxon_name"] = work["taxon_name"].astype("string").str.strip()
+    y_true = pd.to_numeric(work["y_true"], errors="coerce").to_numpy(dtype=float)
+    for model in model_cols:
+        y_pred = pd.to_numeric(work[model], errors="coerce").to_numpy(dtype=float)
+        work[model] = log_bmr_accuracy(y_true, y_pred)
+    out = (
+        work.groupby("taxon_name", as_index=False)[model_cols]
+        .mean(numeric_only=True)
+        .sort_values("taxon_name")
+        .reset_index(drop=True)
     )
-    y_test = test_df[TARGET].to_numpy()
+    return out[["taxon_name", *model_cols]]
+
+
+def write_group_species_accuracy(group_dir: Path, fold_tags: list[str]) -> Path:
+    """
+    Stitch fold/test predictions and write RF/XGB species-level accuracy.
+    """
+    frames: list[pd.DataFrame] = []
+    for tag in fold_tags:
+        pred_path = group_dir / tag / "benchmark_predictions_test.csv"
+        if not pred_path.exists():
+            raise FileNotFoundError(
+                f"Missing prediction file for species accuracy: {pred_path}"
+            )
+        fold_df = pd.read_csv(pred_path)
+        missing = [name for name in MODEL_NAMES if name not in fold_df.columns]
+        if missing:
+            raise KeyError(f"{pred_path} missing model columns: {missing}")
+        fold_df["eval_split"] = tag
+        frames.append(fold_df)
+
+    stitched = pd.concat(frames, ignore_index=True)
+    if stitched.empty:
+        raise ValueError(f"No rows available to stitch under {group_dir}")
+
+    accuracy_df = build_species_accuracy_table(stitched, MODEL_NAMES)
+    group_dir.mkdir(parents=True, exist_ok=True)
+    out_path = group_dir / "species_accuracy.csv"
+    accuracy_df.to_csv(out_path, index=False, encoding="utf-8")
+    print(
+        f"[species accuracy] {group_dir.name}: species={len(accuracy_df)}, "
+        f"splits={fold_tags} -> {out_path}"
+    )
+    return out_path
+
+
+def write_group_eval_from_predictions(
+    group_name: str,
+    group_test_df: pd.DataFrame,
+    pred_df_all: pd.DataFrame,
+    models: dict[str, object],
+    shap_inputs_all: dict[str, pd.DataFrame],
+    out_dir: Path,
+    model_dir: Path,
+    random_state: int,
+    write_models_copy: bool,
+) -> pd.DataFrame:
+    """Write RF and XGB metrics/plots for a class subset."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mask = group_test_df.index.to_numpy()
+    pred_df = pred_df_all.loc[mask].reset_index(drop=True)
+    y_test = pred_df["y_true"].to_numpy(dtype=float)
+    model_names = prediction_model_cols(pred_df)
 
     metrics_rows = []
-    for model in MODEL_NAMES:
-        metrics_rows.append({"model": model, **evaluate(y_test, preds[model])})
+    for model in model_names:
+        metrics_rows.append({"model": model, **evaluate(y_test, pred_df[model].to_numpy())})
     metrics_df = pd.DataFrame(metrics_rows).sort_values("rmse")
     metrics_df.to_csv(out_dir / "benchmark_metrics.csv", index=False, encoding="utf-8")
-
-    prediction_columns = list(dict.fromkeys(["taxon_name", *TAXONOMY_METADATA_COLUMNS, *TREE_MODEL_FEATURES]))
-    pred_df = test_df[prediction_columns].copy()
-    pred_df["y_true"] = y_test
-    for model in MODEL_NAMES:
-        pred_df[model] = preds[model]
     pred_df.to_csv(out_dir / "benchmark_predictions_test.csv", index=False, encoding="utf-8")
 
-    save_loss_curve(
-        train_df=train_df,
-        test_df=test_df,
-        out_dir=out_dir,
-        random_state=random_state,
-        balance_classes=balance_classes,
-    )
-    save_pred_and_residual_plots(out_dir=out_dir, pred_df=pred_df)
+    if write_models_copy:
+        (out_dir / "model_bundle_path.txt").write_text(str(model_dir), encoding="utf-8")
+        save_loss_curve_from_bundle(model_dir, out_dir)
+
+    save_pred_and_residual_plots(out_dir=out_dir, pred_df=pred_df, model_names=model_names)
     save_performance_boxplot(
         out_dir=out_dir,
         y_true=y_test,
         pred_df=pred_df,
         random_state=random_state,
+        model_names=model_names,
     )
+    shap_inputs = {
+        name: frame.loc[mask].reset_index(drop=True) for name, frame in shap_inputs_all.items()
+    }
     save_shap_outputs(
         out_dir=out_dir,
         metrics_df=metrics_df,
@@ -535,15 +973,134 @@ def run_single_group(
         shap_inputs=shap_inputs,
     )
 
-    print(f"\n[{group_name}] Train rows used: {len(train_df)}")
-    print(f"[{group_name}] Test rows used: {len(test_df)}")
-    print(f"[{group_name}] Power-law features: {POWER_LAW_FEATURES}")
-    print(f"[{group_name}] Tree-model features: {TREE_MODEL_FEATURES}")
-    print(f"[{group_name}] Class-balanced training weights: {balance_classes}")
+    print(f"\n[{group_name}] Eval rows: {len(pred_df)} (RF + XGB)")
     print(f"[{group_name}] Saved outputs in: {out_dir}")
-    print(f"\n[{group_name}] Benchmark results:")
     print(metrics_df.to_string(index=False))
     return metrics_df
+
+
+def evaluate_fold_predictions(
+    fold_tag: str,
+    test_df: pd.DataFrame,
+    preds: dict[str, np.ndarray],
+    shap_inputs: dict[str, pd.DataFrame],
+    models: dict[str, object],
+    out_dir: Path,
+    model_dir: Path,
+    random_state: int,
+) -> list[str]:
+    """Write all / class-group eval outputs for RF and XGB."""
+    missing = [name for name in MODEL_NAMES if name not in preds]
+    if missing:
+        raise KeyError(f"Missing predictions for: {missing}")
+
+    groups_done: list[str] = []
+    prediction_columns = list(
+        dict.fromkeys(["taxon_name", *TAXONOMY_METADATA_COLUMNS, *TREE_MODEL_FEATURES])
+    )
+    pred_df_all = test_df[prediction_columns].copy().reset_index(drop=True)
+    pred_df_all["y_true"] = test_df[LOG_TARGET].to_numpy(dtype=float)
+    for name in MODEL_NAMES:
+        pred_df_all[name] = preds[name]
+    shap_inputs = {name: shap_inputs[name].reset_index(drop=True) for name in MODEL_NAMES}
+    models = {name: models[name] for name in MODEL_NAMES}
+    test_df_reset = test_df.reset_index(drop=True)
+
+    for group_name, class_name in GROUP_CLASS_FILTERS.items():
+        if class_name is None:
+            group_idx = test_df_reset.index
+        else:
+            group_idx = test_df_reset.index[test_df_reset["class"] == class_name]
+        if len(group_idx) == 0:
+            print(f"Skip {group_name}/{fold_tag}: no test rows for class={class_name}.")
+            continue
+        group_out = out_dir / group_name / fold_tag
+        write_group_eval_from_predictions(
+            group_name=f"{group_name}/{fold_tag}",
+            group_test_df=test_df_reset.loc[group_idx],
+            pred_df_all=pred_df_all,
+            models=models,
+            shap_inputs_all=shap_inputs,
+            out_dir=group_out,
+            model_dir=model_dir,
+            random_state=random_state,
+            write_models_copy=(group_name == "all"),
+        )
+        groups_done.append(group_name)
+    return groups_done
+
+
+def run_one_fold_global(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    fold_tag: str,
+    out_dir: Path,
+    random_state: int,
+    balance_classes: bool,
+    reset_hp_log: bool = False,
+) -> list[str]:
+    """
+    Train fixed-parameter RF plus tuned XGB, save/reload both, then evaluate.
+    """
+    model_dir = out_dir / "all" / fold_tag / "models"
+
+    print(f"  Tuning + training global models on {len(train_df)} train rows...", flush=True)
+    bundle = tune_models_on_train(
+        train_df=train_df,
+        random_state=random_state,
+        balance_classes=balance_classes,
+    )
+    bundle["fold_tag"] = fold_tag
+    save_model_bundle(bundle, model_dir)
+    write_hp_search_trials_csv(
+        benchmark_dir=out_dir,
+        fold_tag=fold_tag,
+        bundle=bundle,
+        reset=reset_hp_log,
+    )
+
+    print("  Reloading RF and XGB from disk for evaluation...", flush=True)
+    loaded = load_model_bundle(model_dir)
+    preds, shap_inputs = predict_log_bmr(loaded, test_df)
+    return evaluate_fold_predictions(
+        fold_tag=fold_tag,
+        test_df=test_df,
+        preds=preds,
+        shap_inputs=shap_inputs,
+        models=loaded["models"],
+        out_dir=out_dir,
+        model_dir=model_dir,
+        random_state=random_state,
+    )
+
+
+def run_test_with_best_cv_models(
+    test_df: pd.DataFrame,
+    out_dir: Path,
+    random_state: int,
+    source_folds: list[str] | None = None,
+) -> list[str]:
+    """
+    Held-out test: no HP search. Independently select the better f_1/f_2
+    RF and XGB models, then evaluate both on the 20% test set.
+    """
+    fold_tag = "test"
+    model_dir = out_dir / "all" / fold_tag / "models"
+    print("  Selecting best saved RF and XGB folds (no HP search on test)...", flush=True)
+    selection = select_best_models_from_cv_folds(out_dir, source_folds=source_folds)
+    save_test_model_selection(selection, model_dir)
+    selected_bundles = load_selected_models(selection)
+    preds, shap_inputs, models = predict_selected_models(selected_bundles, test_df)
+    return evaluate_fold_predictions(
+        fold_tag=fold_tag,
+        test_df=test_df,
+        preds=preds,
+        shap_inputs=shap_inputs,
+        models=models,
+        out_dir=out_dir,
+        model_dir=model_dir,
+        random_state=random_state,
+    )
 
 
 def main() -> None:
@@ -551,97 +1108,93 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Train class-balanced residual-learning models and evaluate them with "
-            "class-level species-block cross-validation."
+            "Train fixed-parameter RF and exhaustively tuned XGB residual models on "
+            "fold1/fold2, "
+            "save/reload both separately, then independently select the best RF and "
+            "XGB fold models for held-out test evaluation."
         )
     )
     parser.add_argument(
-        "--input",
+        "--split-dir",
         type=Path,
-        default=Path("data/merge_phylo.csv"),
-        help="Full input CSV path used to create a class-level species-block split.",
+        default=Path("data/splits"),
+        help="Directory containing fixed fold1/fold2/test train.csv and test.csv files.",
+    )
+    parser.add_argument(
+        "--folds",
+        nargs="+",
+        default=["fold1", "fold2", "test"],
+        help="Which fixed splits to run (default: fold1 fold2 test).",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("results/benchmark"),
-        help="Output directory. Results are stored under class-name subfolders.",
-    )
-    parser.add_argument(
-        "--split-output-dir",
-        type=Path,
-        default=Path("data/splits"),
-        help="Directory for the generated species-block train/test files.",
-    )
-    parser.add_argument(
-        "--test-species-ratio",
-        type=float,
-        default=0.3,
-        help="Per-class ratio of species blocks held out for testing.",
+        help="Output directory. Results are stored under <group>/f_1, f_2, and test.",
     )
     parser.add_argument("--random-state", type=int, default=42, help="Random seed.")
     args = parser.parse_args()
 
-    if not 0 < args.test_species_ratio < 1:
-        raise ValueError("--test-species-ratio must be in (0, 1).")
-
-    input_path = args.input if args.input.is_absolute() else root / args.input
+    split_dir = args.split_dir if args.split_dir.is_absolute() else root / args.split_dir
     out_dir = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
-    split_out_dir = (
-        args.split_output_dir if args.split_output_dir.is_absolute() else root / args.split_output_dir
-    )
     out_dir.mkdir(parents=True, exist_ok=True)
-    split_out_dir.mkdir(parents=True, exist_ok=True)
 
-    full_df = load_full_data(input_path)
-    train_df, test_df_all, split_summary = make_class_species_block_split(
-        full_df,
-        test_species_ratio=args.test_species_ratio,
-        random_state=args.random_state,
-    )
-    train_df.to_csv(split_out_dir / "train.csv", index=False, encoding="utf-8")
-    test_df_all.to_csv(split_out_dir / "test.csv", index=False, encoding="utf-8")
-    split_summary.to_csv(split_out_dir / "class_species_block_split_summary.csv", index=False, encoding="utf-8")
-    split_summary.to_csv(out_dir / "class_species_block_split_summary.csv", index=False, encoding="utf-8")
+    fold_splits = discover_fold_splits(split_dir, folds=list(args.folds))
+    fold_tags_done: list[str] = []
+    groups_done: list[str] = []
+    hp_log_reset_done = False
 
-    summary_rows: list[dict[str, float | str]] = []
-    for group_name, class_name in GROUP_CLASS_FILTERS.items():
-        if class_name is None:
-            group_test_df = test_df_all.copy()
+    for fold_name, train_path, test_path in fold_splits:
+        fold_tag = FOLD_DIR_NAMES.get(fold_name, fold_name)
+        fold_tags_done.append(fold_tag)
+        print(f"\n=== {fold_tag} ({fold_name}): {train_path} | {test_path} ===", flush=True)
+        test_df_all = load_split_data(test_path)
+
+        if fold_tag == "test" or fold_name == "test":
+            # Optional leakage check against the 80% train if present.
+            if train_path.exists():
+                train_df = load_split_data(train_path)
+                assert_no_species_leakage(train_df, test_df_all)
+            done = run_test_with_best_cv_models(
+                test_df=test_df_all,
+                out_dir=out_dir,
+                random_state=args.random_state,
+                source_folds=["f_1", "f_2"],
+            )
         else:
-            group_test_df = test_df_all[test_df_all["class"] == class_name].copy()
-        if group_test_df.empty:
-            raise ValueError(f"Group {group_name} has no rows for class={class_name}.")
+            train_df = load_split_data(train_path)
+            assert_no_species_leakage(train_df, test_df_all)
+            reset_hp_log = not hp_log_reset_done
+            done = run_one_fold_global(
+                train_df=train_df,
+                test_df=test_df_all,
+                fold_tag=fold_tag,
+                out_dir=out_dir,
+                random_state=args.random_state,
+                balance_classes=True,
+                reset_hp_log=reset_hp_log,
+            )
+            hp_log_reset_done = True
 
-        group_out_dir = out_dir / group_name
-        metrics_df = run_single_group(
-            group_name=group_name,
-            train_df=train_df,
-            test_df=group_test_df,
-            out_dir=group_out_dir,
-            random_state=args.random_state,
-            balance_classes=True,
-        )
-        best_row = metrics_df.sort_values("rmse").iloc[0]
-        summary_rows.append(
-            {
-                "group": group_name,
-                "class_filter": class_name if class_name is not None else "ALL",
-                "test_rows": int(len(group_test_df)),
-                "best_model": str(best_row["model"]),
-                "best_rmse": float(best_row["rmse"]),
-                "best_mae": float(best_row["mae"]),
-                "best_r2": float(best_row["r2"]),
-            }
-        )
+        for g in done:
+            if g not in groups_done:
+                groups_done.append(g)
 
-    summary_df = pd.DataFrame(summary_rows)
-    summary_path = out_dir / "benchmark_summary_groups.csv"
-    summary_df.to_csv(summary_path, index=False, encoding="utf-8")
-    print(f"\nSaved species-block train: {split_out_dir / 'train.csv'}")
-    print(f"Saved species-block test: {split_out_dir / 'test.csv'}")
-    print(f"Saved split summary: {split_out_dir / 'class_species_block_split_summary.csv'}")
-    print(f"\nSaved group summary: {summary_path}")
+    if fold_tags_done:
+        for group_name in groups_done:
+            write_group_species_accuracy(
+                group_dir=out_dir / group_name,
+                fold_tags=fold_tags_done,
+            )
+    else:
+        print("Skip species accuracy CSV: no evaluation splits completed.")
+
+    print(f"\nRead fixed splits from: {split_dir}")
+    print(f"Wrote fold results under: {out_dir}/<group>/f_1|f_2|test/")
+    print(f"Global models under: {out_dir}/all/<fold>/models/")
+    print(f"Exhaustive XGB search log: {out_dir}/hp_search_trials.csv")
+    print(f"Best XGB params: {out_dir}/xgb_best_params_f_1.csv and xgb_best_params_f_2.csv")
+    print(f"Wrote species accuracy under: {out_dir}/<group>/species_accuracy.csv")
 
 
 if __name__ == "__main__":

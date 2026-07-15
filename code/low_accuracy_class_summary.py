@@ -23,13 +23,13 @@ def resolve_path(root: Path, path: Path) -> Path:
 
 
 def fold_accuracy(y_true: pd.Series, y_pred: pd.Series) -> np.ndarray:
+    """Symmetric accuracy on log_BMR: exp(-|log_pred - log_true|)."""
     y_true_arr = pd.to_numeric(y_true, errors="coerce").to_numpy(dtype=float)
     y_pred_arr = pd.to_numeric(y_pred, errors="coerce").to_numpy(dtype=float)
-    valid = np.isfinite(y_true_arr) & np.isfinite(y_pred_arr) & (y_true_arr > 0) & (y_pred_arr > 0)
+    valid = np.isfinite(y_true_arr) & np.isfinite(y_pred_arr)
 
     out = np.full(len(y_true_arr), np.nan, dtype=float)
-    ratio = y_pred_arr[valid] / y_true_arr[valid]
-    out[valid] = np.minimum(ratio, 1.0 / ratio)
+    out[valid] = np.exp(-np.abs(y_pred_arr[valid] - y_true_arr[valid]))
     return np.clip(out, 0.0, 1.0)
 
 
@@ -87,7 +87,7 @@ def main() -> None:
     parser.add_argument(
         "--predictions",
         type=Path,
-        default=Path("results/benchmark/all/benchmark_predictions_test.csv"),
+        default=Path("results/benchmark/all/f_1/benchmark_predictions_test.csv"),
         help="Prediction CSV with taxon_name, class, y_true, and xgboost columns.",
     )
     parser.add_argument(

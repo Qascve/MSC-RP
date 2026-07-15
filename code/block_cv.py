@@ -304,16 +304,23 @@ def write_fold_files(
     return pd.DataFrame(summary_rows)
 
 
-def safe_evaluate(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
+def safe_evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
+    """Evaluate on log_BMR only."""
+    y_true_log = np.asarray(y_true_log, dtype=float)
+    y_pred_log = np.asarray(y_pred_log, dtype=float)
+    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
+    y_true_log = y_true_log[mask]
+    y_pred_log = y_pred_log[mask]
+    if len(y_true_log) == 0:
+        return {"rmse": np.nan, "mae": np.nan, "r2": np.nan}
+
     out = {
-        "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
-        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "rmse": float(np.sqrt(mean_squared_error(y_true_log, y_pred_log))),
+        "mae": float(mean_absolute_error(y_true_log, y_pred_log)),
         "r2": np.nan,
     }
-    if len(y_true) >= 2 and not np.isclose(y_true.var(), 0.0):
-        out["r2"] = float(r2_score(y_true, y_pred))
+    if len(y_true_log) >= 2 and not np.isclose(y_true_log.var(), 0.0):
+        out["r2"] = float(r2_score(y_true_log, y_pred_log))
     return out
 
 
@@ -421,7 +428,7 @@ def run_residual_learning_cv(
         pred_df["cv_row_id"] = df.loc[df["cv_row_id"].isin(test_ids), "cv_row_id"].to_numpy()
         pred_df["block_column"] = pred_df["cv_row_id"].map(fold_meta["block_column"])
         pred_df["block_id"] = pred_df["cv_row_id"].map(fold_meta["block_id"])
-        pred_df["y_true"] = test_df[TARGET].to_numpy()
+        pred_df["y_true"] = test_df[LOG_TARGET].to_numpy()
         for model in model_names:
             pred_df[model] = preds[model]
             fold_metrics = safe_evaluate(pred_df["y_true"].to_numpy(), pred_df[model].to_numpy())
@@ -517,7 +524,7 @@ def run_leave_class_out(
         pred_df = test_df[[SPECIES_COL, CLASS_COL, "Genus", "family", "order", "log_mass", "inv_kT"]].copy()
         pred_df["group"] = group_name
         pred_df["held_out_class"] = class_name
-        pred_df["y_true"] = test_df[TARGET].to_numpy()
+        pred_df["y_true"] = test_df[LOG_TARGET].to_numpy()
         for model in model_names:
             pred_df[model] = preds[model]
 

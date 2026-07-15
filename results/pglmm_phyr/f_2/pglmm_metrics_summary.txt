@@ -1,0 +1,2 @@
+PGLMM test-set metrics (log_BMR)
+log_BMR: n = 760, RMSE = 1.532409, MAE = 1.165258, R2 = 0.859706

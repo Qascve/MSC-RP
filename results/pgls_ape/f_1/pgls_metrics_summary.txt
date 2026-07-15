@@ -1,0 +1,12 @@
+PGLS model comparison
+Formula: log_BMR ~ log_mass + inv_kT
+Best model: pglsModel_Brownian
+Best AIC: -13231.547796
+Pagel lambda residual test start value: 0.935641
+log_BMR test RMSE: 1.206481
+log_BMR test MAE: 0.942928
+log_BMR test R2: 0.827651
+Bad branch count: 62
+Train rows used: 602
+Train species used: 313
+Test rows predicted: 2200

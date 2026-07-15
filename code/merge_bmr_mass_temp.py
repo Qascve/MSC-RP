@@ -7,23 +7,30 @@ Sources:
 - data/raw/observations.xlsx
 - data/raw/41586_2010_BFnature08920_MOESM90_ESM.xls
 
+Keep every observation row that simultaneously has:
+Genus, species, temperature, and BMR.
+No per-species record-count limit is applied.
+
 Output columns (fixed order):
 - class
 - order
 - family
 - Genus
 - species
-- wet_Mass_g
 - wet_Mass_kg
 - BMR
 - BMR_unit
 - temperature
 - temperature_unit
 - Reference
+
+Mass is standardized to kg and BMR to W. Genus/species are kept as parsed
+from source binomials without renaming.
 """
 
 from __future__ import annotations
 import argparse
+import re
 from pathlib import Path
 import time
 from typing import Optional
@@ -36,6 +43,20 @@ GENUS_COL = "Genus"
 SPECIES_COL = "species"
 WET_G_COL = "wet_Mass_g"
 WET_KG_COL = "wet_Mass_kg"
+
+OUTPUT_COLS = [
+    "class",
+    "order",
+    "family",
+    GENUS_COL,
+    SPECIES_COL,
+    WET_KG_COL,
+    "BMR",
+    "BMR_unit",
+    "temperature",
+    "temperature_unit",
+    "Reference",
+]
 
 
 def find_root(start: Optional[Path] = None, marker: str = ".gitignore") -> Path:
@@ -109,6 +130,7 @@ def numeric(series: pd.Series) -> pd.Series:
 
 
 def make_output_frame(length: int) -> pd.DataFrame:
+    # Keep wet_Mass_g only as an internal helper during conversion.
     cols = [
         "class",
         "order",
@@ -154,7 +176,78 @@ def convert_mass_value_unit_to_g_kg(
 
     g = np.where(is_kg, value * 1000.0, np.where(is_g, value, np.where(is_mg, value / 1000.0, np.nan)))
     kg = np.where(is_kg, value, np.where(is_g, value / 1000.0, np.where(is_mg, value / 1_000_000.0, np.nan)))
-    return pd.Series(g), pd.Series(kg)
+    return pd.Series(g, index=mass_value.index), pd.Series(kg, index=mass_value.index)
+
+
+def normalize_bmr_unit(unit: object) -> str:
+    text = normalize_text_value(unit).lower()
+    text = text.replace(".", "").replace(" ", "")
+    text = text.replace("watts", "w").replace("watt", "w")
+    return text
+
+
+def convert_bmr_value_unit_to_w(
+    bmr_value: pd.Series, bmr_unit: pd.Series
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Convert metabolic rate to watts.
+    Supported: W, mW, kW, J/s (treated as W).
+    """
+    value = numeric(bmr_value)
+    unit = bmr_unit.map(normalize_bmr_unit)
+
+    is_w = unit.isin(["w", "js", "j/s"])
+    is_mw = unit.isin(["mw", "milliwatt", "milliwatts"])
+    is_kw = unit.isin(["kw", "kilowatt", "kilowatts"])
+
+    watts = np.where(
+        is_w,
+        value,
+        np.where(is_mw, value / 1000.0, np.where(is_kw, value * 1000.0, np.nan)),
+    )
+    unit_out = pd.Series(
+        np.where(pd.notna(watts), "W", pd.NA),
+        index=bmr_value.index,
+        dtype="string",
+    )
+    return pd.Series(watts, index=bmr_value.index), unit_out
+
+
+def parse_temperature_series(series: pd.Series) -> pd.Series:
+    """
+    Parse numeric temperatures and simple ranges (e.g. '25-35', '4-20C') to midpoint.
+    Non-numeric placeholders such as ENDO/ND become NaN.
+    """
+    values: list[float] = []
+    for raw in series.tolist():
+        text = normalize_text_value(raw)
+        if not text:
+            values.append(np.nan)
+            continue
+        upper = text.upper()
+        if upper in {"ENDO", "ND", "NA", "N/A", "NAN", "NONE"}:
+            values.append(np.nan)
+            continue
+
+        direct = pd.to_numeric(pd.Series([text]), errors="coerce").iloc[0]
+        if pd.notna(direct):
+            values.append(float(direct))
+            continue
+
+        cleaned = re.sub(r"[°º]?\s*[Cc]\b", "", text)
+        cleaned = cleaned.replace("–", "-").replace("—", "-")
+        match = re.fullmatch(
+            r"\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*",
+            cleaned,
+        )
+        if match:
+            low = float(match.group(1))
+            high = float(match.group(2))
+            values.append((low + high) / 2.0)
+        else:
+            values.append(np.nan)
+
+    return pd.Series(values, index=series.index, dtype="float64")
 
 
 def infer_unit_from_colname(colname: str) -> str:
@@ -452,20 +545,44 @@ def clean_text_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return out
 
 
+def is_valid_taxon_token(series: pd.Series, *, allow_numeric: bool = False) -> pd.Series:
+    """Reject blank / placeholder genus-species tokens such as NA, unknown, or bare numbers."""
+    text = series.astype("string").str.strip()
+    lower = text.str.lower()
+    invalid = {
+        "",
+        "na",
+        "n/a",
+        "nan",
+        "none",
+        "null",
+        "unknown",
+        "unidentified",
+        "sp",
+        "sp.",
+        "spp",
+        "spp.",
+    }
+    ok = text.notna() & ~lower.isin(invalid)
+    if not allow_numeric:
+        ok = ok & ~text.str.fullmatch(r"\d+")
+    # Reject tokens that start with NA placeholder patterns: "NA", "NA 1", "NA2"
+    ok = ok & ~lower.str.match(r"^na(?:[\s_-]*\d+)?$", na=False)
+    return ok.fillna(False)
+
+
 def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     """
-    1) Drop rows missing any core field:
-       Genus, species, wet_Mass_g, wet_Mass_kg, BMR, BMR_unit, temperature.
-    2) Remove duplicates for biologically-equivalent records.
+    1) Keep rows that simultaneously have Genus, species, temperature, and BMR.
+       Also require wet_Mass_kg so body mass can be retained in kg.
+       No per-species record-count limit is applied.
+    2) Remove exact-duplicate biologically-equivalent records.
     """
     out = df.copy()
 
     core_mask = (
-        out[GENUS_COL].astype("string").str.strip().notna()
-        & (out[GENUS_COL].astype("string").str.strip() != "")
-        & out[SPECIES_COL].astype("string").str.strip().notna()
-        & (out[SPECIES_COL].astype("string").str.strip() != "")
-        & pd.to_numeric(out[WET_G_COL], errors="coerce").notna()
+        is_valid_taxon_token(out[GENUS_COL])
+        & is_valid_taxon_token(out[SPECIES_COL])
         & pd.to_numeric(out[WET_KG_COL], errors="coerce").notna()
         & pd.to_numeric(out["BMR"], errors="coerce").notna()
         & out["BMR_unit"].astype("string").str.strip().notna()
@@ -480,7 +597,6 @@ def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
         "class",
         "order",
         "family",
-        WET_G_COL,
         WET_KG_COL,
         "BMR",
         "BMR_unit",
@@ -490,6 +606,49 @@ def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     ]
     out = out.drop_duplicates(subset=dedup_cols, keep="first")
     return out
+
+
+def unique_classes_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize unique class values after merge (Genus/species unchanged)."""
+    out = df.copy()
+    out["class"] = out["class"].astype("string").str.strip().replace(
+        {"": pd.NA, "nan": pd.NA, "NaN": pd.NA}
+    )
+    binomial = (
+        out[GENUS_COL].astype("string").str.strip().fillna("")
+        + " "
+        + out[SPECIES_COL].astype("string").str.strip().fillna("")
+    ).str.strip()
+    out["binomial"] = binomial.where(binomial != "", pd.NA)
+
+    rows: list[dict[str, object]] = []
+    counts = out["class"].dropna().value_counts()
+    for class_name, n_rows in counts.items():
+        subset = out.loc[out["class"] == class_name]
+        rows.append(
+            {
+                "class": str(class_name),
+                "rows": int(n_rows),
+                "unique_genus_species": int(subset["binomial"].nunique(dropna=True)),
+            }
+        )
+
+    missing = out["class"].isna()
+    if missing.any():
+        rows.append(
+            {
+                "class": "(missing)",
+                "rows": int(missing.sum()),
+                "unique_genus_species": int(out.loc[missing, "binomial"].nunique(dropna=True)),
+            }
+        )
+
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        result = result.sort_values(
+            by=["rows", "class"], ascending=[False, True], kind="mergesort"
+        ).reset_index(drop=True)
+    return result
 
 
 def parse_41586(path: Path) -> pd.DataFrame:
@@ -508,10 +667,16 @@ def parse_41586(path: Path) -> pd.DataFrame:
     mass_g, mass_kg, raw_mass = mass_from_candidates(df, mass_candidates)
     out[WET_G_COL] = mass_g
     out[WET_KG_COL] = mass_kg
-    out["BMR"] = numeric(df["BMR (W)"]) if "BMR (W)" in df.columns else np.nan
-    bmr_mask = pd.to_numeric(out["BMR"], errors="coerce").notna()
-    out["BMR_unit"] = pd.Series("W", index=out.index, dtype="string").where(bmr_mask, pd.NA)
-    out["temperature"] = numeric(df["Temperature (C)"]) if "Temperature (C)" in df.columns else np.nan
+
+    bmr_raw = numeric(df["BMR (W)"]) if "BMR (W)" in df.columns else pd.Series([np.nan] * len(df))
+    bmr_unit_raw = pd.Series(["W"] * len(df), dtype="string")
+    out["BMR"], out["BMR_unit"] = convert_bmr_value_unit_to_w(bmr_raw, bmr_unit_raw)
+
+    out["temperature"] = (
+        parse_temperature_series(df["Temperature (C)"])
+        if "Temperature (C)" in df.columns
+        else np.nan
+    )
     temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
     out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
         temp_mask, pd.NA
@@ -549,12 +714,17 @@ def parse_pnas(path: Path) -> pd.DataFrame:
     out[WET_G_COL] = mass_g
     out[WET_KG_COL] = mass_kg
 
-    bmr_col = "Metabolic Rate (W, at 25C)"
-    out["BMR"] = numeric(df[bmr_col]) if bmr_col in df.columns else np.nan
-    bmr_mask = pd.to_numeric(out["BMR"], errors="coerce").notna()
-    out["BMR_unit"] = pd.Series("W", index=out.index, dtype="string").where(bmr_mask, pd.NA)
+    # Prefer rate measured at reported temperature T; fall back to 25C-standardized rate.
+    bmr_raw = pd.Series([np.nan] * len(df), dtype="float64")
+    if "Metabolic Rate (W, at T)" in df.columns:
+        bmr_raw = numeric(df["Metabolic Rate (W, at T)"])
+    if "Metabolic Rate (W, at 25C)" in df.columns:
+        bmr_25 = numeric(df["Metabolic Rate (W, at 25C)"])
+        bmr_raw = bmr_raw.where(bmr_raw.notna(), bmr_25)
+    bmr_unit_raw = pd.Series(["W"] * len(df), dtype="string")
+    out["BMR"], out["BMR_unit"] = convert_bmr_value_unit_to_w(bmr_raw, bmr_unit_raw)
 
-    out["temperature"] = numeric(df["T (C)"]) if "T (C)" in df.columns else np.nan
+    out["temperature"] = parse_temperature_series(df["T (C)"]) if "T (C)" in df.columns else np.nan
     temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
     out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
         temp_mask, pd.NA
@@ -594,13 +764,17 @@ def parse_observations(path: Path) -> pd.DataFrame:
         if "metabolic rate" in df.columns
         else pd.Series([np.nan] * len(df))
     )
-    mr_unit = df["metabolic rate - units"] if "metabolic rate - units" in df.columns else pd.Series([np.nan] * len(df))
-    out["BMR"] = mr
-    bmr_mask = pd.to_numeric(out["BMR"], errors="coerce").notna()
-    out["BMR_unit"] = mr_unit.astype("string").where(bmr_mask, pd.NA)
+    mr_unit = (
+        df["metabolic rate - units"]
+        if "metabolic rate - units" in df.columns
+        else pd.Series([pd.NA] * len(df), dtype="string")
+    )
+    out["BMR"], out["BMR_unit"] = convert_bmr_value_unit_to_w(mr, mr_unit)
 
     out["temperature"] = (
-        numeric(df["original temperature"]) if "original temperature" in df.columns else np.nan
+        parse_temperature_series(df["original temperature"])
+        if "original temperature" in df.columns
+        else np.nan
     )
     temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
     out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
@@ -611,7 +785,7 @@ def parse_observations(path: Path) -> pd.DataFrame:
     # If mass unit is missing/unknown but mass+BMR exist, default to wet mass in grams.
     fallback_mask = (
         pd.to_numeric(out[WET_G_COL], errors="coerce").isna()
-        & mr.notna()
+        & pd.to_numeric(out["BMR"], errors="coerce").notna()
         & pd.to_numeric(raw_mass, errors="coerce").notna()
     )
     out.loc[fallback_mask, WET_G_COL] = raw_mass.loc[fallback_mask]
@@ -634,6 +808,12 @@ def main() -> None:
         type=Path,
         default=None,
         help="Output CSV path (default: <base-dir>/data/cleaning/merged_bmr_mass_temperature.csv).",
+    )
+    parser.add_argument(
+        "--classes-output",
+        type=Path,
+        default=None,
+        help="Unique-class CSV path (default: <base-dir>/data/cleaning/merged_unique_classes.csv).",
     )
     parser.add_argument(
         "--gbif-timeout-seconds",
@@ -666,6 +846,14 @@ def main() -> None:
         output_path = base_dir / "data" / "cleaning" / "merged_bmr_mass_temperature.csv"
     else:
         output_path = args.output if args.output.is_absolute() else base_dir / args.output
+    if args.classes_output is None:
+        classes_output_path = base_dir / "data" / "cleaning" / "merged_unique_classes.csv"
+    else:
+        classes_output_path = (
+            args.classes_output
+            if args.classes_output.is_absolute()
+            else base_dir / args.classes_output
+        )
 
     pnas_path = base_dir / "data" / "raw" / "pnas.2303764120.sd01.xlsx"
     obs_path = base_dir / "data" / "raw" / "observations.xlsx"
@@ -695,6 +883,7 @@ def main() -> None:
     )
 
     # Always keep only usable core rows and remove duplicate records.
+    # Multiple observations per Genus+species are intentionally retained.
     merged = drop_incomplete_core_and_deduplicate(merged)
 
     merged, missing_before, missing_after = fill_missing_taxonomy_with_gbif(
@@ -717,19 +906,36 @@ def main() -> None:
         f"family={missing_after['family']}"
     )
 
+    merged = merged.reindex(columns=OUTPUT_COLS)
+    classes_df = unique_classes_frame(merged)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(output_path, index=False, encoding="utf-8")
+    classes_df.to_csv(classes_output_path, index=False, encoding="utf-8")
 
     try:
         saved_path = output_path.relative_to(base_dir)
     except ValueError:
         saved_path = output_path
+    try:
+        classes_saved_path = classes_output_path.relative_to(base_dir)
+    except ValueError:
+        classes_saved_path = classes_output_path
+
+    binomial = (
+        merged[GENUS_COL].astype("string").str.strip().fillna("")
+        + " "
+        + merged[SPECIES_COL].astype("string").str.strip().fillna("")
+    ).str.strip()
     print(f"Saved: {saved_path}")
+    print(f"Saved unique classes: {classes_saved_path}")
     print(f"Rows: {len(merged)}")
+    print(f"Unique Genus+species: {int(binomial.replace('', pd.NA).nunique(dropna=True))}")
+    print(f"Unique classes: {int(merged['class'].nunique(dropna=True))}")
     print("Non-null counts:")
-    for c in [GENUS_COL, SPECIES_COL, WET_G_COL, WET_KG_COL, "BMR", "temperature"]:
+    for c in [GENUS_COL, SPECIES_COL, WET_KG_COL, "BMR", "temperature"]:
         print(f"  {c}: {int(merged[c].notna().sum())}")
-    print(f"Unique species: {len(merged[SPECIES_COL].unique())}")
+    print(f"BMR units: {sorted(merged['BMR_unit'].dropna().astype(str).unique().tolist())}")
 
 
 if __name__ == "__main__":

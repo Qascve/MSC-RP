@@ -4,7 +4,7 @@ parse_args <- function() {
   args <- commandArgs(trailingOnly = TRUE)
   values <- list(
     tree = "data/phylogeny/unique_taxon_names.nwk",
-    predictions = "results/benchmark/all/benchmark_predictions_test.csv",
+    predictions = "results/benchmark/all/f_1/benchmark_predictions_test.csv",
     output_dir = "results/plots"
   )
   i <- 1
@@ -71,12 +71,12 @@ taxon_to_tip_label <- function(x) {
 }
 
 fold_accuracy <- function(y_true, y_pred) {
+  # Symmetric accuracy on log_BMR: exp(-|log_pred - log_true|)
   y_true <- suppressWarnings(as.numeric(y_true))
   y_pred <- suppressWarnings(as.numeric(y_pred))
   out <- rep(NA_real_, length(y_true))
-  valid <- is.finite(y_true) & is.finite(y_pred) & y_true > 0 & y_pred > 0
-  ratio <- y_pred[valid] / y_true[valid]
-  out[valid] <- pmin(ratio, 1 / ratio)
+  valid <- is.finite(y_true) & is.finite(y_pred)
+  out[valid] <- exp(-abs(y_pred[valid] - y_true[valid]))
   pmin(pmax(out, 0), 1)
 }
 

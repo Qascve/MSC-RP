@@ -50,8 +50,8 @@ parse_args <- function(args) {
   }
 
   list(
-    train = get_value("--train", "data/splits/train.csv"),
-    test = get_value("--test", "data/splits/test.csv"),
+    train = get_value("--train", "data/splits/fold1/train.csv"),
+    test = get_value("--test", "data/splits/fold1/test.csv"),
     tree = get_value("--tree", "data/phylogeny/unique_taxon_names.nwk"),
     out_dir = get_value("--out-dir", "results/pgls_ape"),
     formula = get_value("--formula", "log_BMR ~ log_mass + inv_kT")
@@ -339,24 +339,20 @@ main <- function() {
     "fixed_effect_species_absent_from_phylogeny"
   )
   test$y_pred_log_BMR <- as.numeric(stats::predict(best_fit, newdata = test))
-  test$y_pred_BMR <- exp(test$y_pred_log_BMR)
 
   train_phylo$y_fitted_log_BMR <- as.numeric(stats::fitted(best_fit))
-  train_phylo$y_fitted_BMR <- exp(train_phylo$y_fitted_log_BMR)
   train_phylo$residual_log_BMR <- stats::residuals(best_fit, type = "response")
 
-  test_metrics_bmr <- metrics(test$BMR, test$y_pred_BMR)
   test_metrics_log <- metrics(test$log_BMR, test$y_pred_log_BMR)
-  metric_out <- rbind(
-    data.frame(scale = "BMR", test_metrics_bmr),
-    data.frame(scale = "log_BMR", test_metrics_log)
-  )
+  metric_out <- data.frame(scale = "log_BMR", test_metrics_log)
 
   aic_table$delta_AIC <- aic_table$AIC - min(aic_table$AIC, na.rm = TRUE)
   aic_table <- aic_table[order(aic_table$AIC), , drop = FALSE]
   write.csv(aic_table, file.path(out_dir, "pgls_aic_scores.csv"), row.names = FALSE)
-  write.csv(test, file.path(out_dir, "pgls_test_predictions.csv"), row.names = FALSE)
-  write.csv(train_phylo, file.path(out_dir, "pgls_train_fitted.csv"), row.names = FALSE)
+  test_out <- test[, setdiff(names(test), c("BMR", "BMR_unit")), drop = FALSE]
+  train_out <- train_phylo[, setdiff(names(train_phylo), c("BMR", "BMR_unit")), drop = FALSE]
+  write.csv(test_out, file.path(out_dir, "pgls_test_predictions.csv"), row.names = FALSE)
+  write.csv(train_out, file.path(out_dir, "pgls_train_fitted.csv"), row.names = FALSE)
   write.csv(metric_out, file.path(out_dir, "pgls_test_metrics.csv"), row.names = FALSE)
   writeLines(capture.output(summary(best_fit)), file.path(out_dir, "pgls_best_model_summary.txt"))
   writeLines(
@@ -366,9 +362,8 @@ main <- function() {
       sprintf("Best model: %s", best_model_name),
       sprintf("Best AIC: %.6f", ok_aic$AIC[[1]]),
       sprintf("Pagel lambda residual test start value: %.6f", lambda_signal$lambda),
-      sprintf("BMR test RMSE: %.6f", test_metrics_bmr$rmse),
-      sprintf("BMR test R2: %.6f", test_metrics_bmr$r2),
       sprintf("log_BMR test RMSE: %.6f", test_metrics_log$rmse),
+      sprintf("log_BMR test MAE: %.6f", test_metrics_log$mae),
       sprintf("log_BMR test R2: %.6f", test_metrics_log$r2),
       sprintf("Bad branch count: %d", bad_branch_filter$bad_edge_count),
       sprintf("Train rows used: %d", nrow(train_phylo)),
@@ -381,8 +376,8 @@ main <- function() {
   cat("PGLS finished\n")
   cat("  Best model:", best_model_name, "\n")
   cat("  Best AIC:", sprintf("%.6f", ok_aic$AIC[[1]]), "\n")
-  cat("  Test RMSE (BMR):", sprintf("%.6f", test_metrics_bmr$rmse), "\n")
-  cat("  Test R2 (BMR):", sprintf("%.6f", test_metrics_bmr$r2), "\n")
+  cat("  Test RMSE (log_BMR):", sprintf("%.6f", test_metrics_log$rmse), "\n")
+  cat("  Test R2 (log_BMR):", sprintf("%.6f", test_metrics_log$r2), "\n")
   cat("  Output directory:", out_dir, "\n")
 }
 
