@@ -18,12 +18,14 @@ MASS_COL = "wet_Mass_kg"
 TEMP_COL = "temperature"
 CLADE_COL = "class"
 K_BOLTZMANN_EV_PER_K = 8.617e-5
+PHYLO_PC_COLS = ["pc1", "pc2", "pc3", "pc4", "pc5"]
 ML_MODEL_SUFFIXES = ("m0", "m1", "m2", "m3", "m4")
 LINEAR_NAME_MAP = {
     "m0_fixed_b_3_4": "M0-L",
     "m1_estimated_b": "M1-L",
     "m2_baseline_mte": "M2-L",
     "m3_clade_specific_mte": "M3-L",
+    "m4_phylo_linear_mte": "M4-L",
     "m4_pgls_ape_mte": "M4-PGLS",
 }
 
@@ -60,7 +62,7 @@ def run_python_dependency(
 
 def load_split_data(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    required = ["taxon_name", CLADE_COL, MASS_COL, TEMP_COL, TARGET]
+    required = ["taxon_name", CLADE_COL, MASS_COL, TEMP_COL, TARGET, *PHYLO_PC_COLS]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
@@ -68,7 +70,7 @@ def load_split_data(path: Path) -> pd.DataFrame:
     out = df[required].copy()
     out["taxon_name"] = out["taxon_name"].astype("string").str.strip().replace("", pd.NA)
     out[CLADE_COL] = out[CLADE_COL].astype("string").str.strip().replace("", pd.NA)
-    for col in [MASS_COL, TEMP_COL, TARGET]:
+    for col in [MASS_COL, TEMP_COL, TARGET, *PHYLO_PC_COLS]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     out = out.dropna(subset=required).copy()
@@ -121,6 +123,33 @@ def build_design_m3(df: pd.DataFrame, clade_levels: list[str]) -> tuple[np.ndarr
     return X, names
 
 
+def build_design_m4(df: pd.DataFrame, pc_cols: list[str] | None = None) -> tuple[np.ndarray, list[str]]:
+    """
+    M4 linear design: log_BMR ~ log_mass + inv_kT + PC axes + interactions
+    (log_mass * PC, inv_kT * PC), matching bmr_models.py m4 with algo=lm.
+    """
+    pc_cols = pc_cols or PHYLO_PC_COLS
+    x_log_mass = df["log_mass"].to_numpy(dtype=float)
+    x_inv_kT = df["inv_kT"].to_numpy(dtype=float)
+
+    blocks = [np.ones(len(df), dtype=float), x_log_mass, x_inv_kT]
+    names = ["Intercept", "log_mass", "inv_kT"]
+
+    for pc in pc_cols:
+        x_pc = df[pc].to_numpy(dtype=float)
+        blocks.append(x_pc)
+        names.append(pc)
+
+    for pc in pc_cols:
+        x_pc = df[pc].to_numpy(dtype=float)
+        blocks.append(x_log_mass * x_pc)
+        names.append(f"log_mass_x_{pc}")
+        blocks.append(x_inv_kT * x_pc)
+        names.append(f"inv_kT_x_{pc}")
+
+    return np.column_stack(blocks), names
+
+
 def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
     """Evaluate on log10(BMR) only."""
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
@@ -160,6 +189,7 @@ LINEAR_MODEL_KEYS = (
     "m1_estimated_b",
     "m2_baseline_mte",
     "m3_clade_specific_mte",
+    "m4_phylo_linear_mte",
     "m4_pgls_ape_mte",
 )
 
@@ -498,11 +528,19 @@ def run_models(
     yhat_m3_train = predict_ols(X3_train, coef_m3)
     yhat_m3_log = predict_ols(X3_test, coef_m3)
 
+    # m4: log_BMR ~ (log_mass + inv_kT) * phylogeny (PC1-5 linear interactions)
+    X4_train, _ = build_design_m4(train_df)
+    X4_test, _ = build_design_m4(test_df)
+    coef_m4 = fit_ols(X4_train, y_train_log)
+    yhat_m4_train = predict_ols(X4_train, coef_m4)
+    yhat_m4_log = predict_ols(X4_test, coef_m4)
+
     y_true = test_df["log_BMR"].to_numpy()
     predictions: dict[str, np.ndarray] = {
         "m0_fixed_b_3_4": yhat_m0_log,
         "m1_estimated_b": yhat_m1_log,
         "m2_baseline_mte": yhat_m2_log,
+        "m4_phylo_linear_mte": yhat_m4_log,
         "m4_pgls_ape_mte": pgls_predictions,
         **benchmark_predictions,
         **residual_learning_predictions,
@@ -512,6 +550,7 @@ def run_models(
         "m1_estimated_b": yhat_m1_train,
         "m2_baseline_mte": yhat_m2_train,
         "m3_clade_specific_mte": yhat_m3_train,
+        "m4_phylo_linear_mte": yhat_m4_train,
         "m4_pgls_ape_mte": pgls_train_predictions,
         **benchmark_train_predictions,
         **residual_train_predictions,
@@ -627,6 +666,17 @@ def _is_explore_ml_model(name: str) -> bool:
     ) and not n.startswith("Residual")
 
 
+def _is_ml_spec_model(name: str) -> bool:
+    n = str(name)
+    if n.startswith("Residual"):
+        return False
+    for spec in ML_MODEL_SUFFIXES:
+        tier = f"M{spec[-1]}"
+        if n in (f"{tier}-RF", f"{tier}-XGB"):
+            return True
+    return False
+
+
 def _is_residual_model(name: str) -> bool:
     return str(name).startswith("Residual")
 
@@ -636,39 +686,33 @@ def _is_linear_model(name: str) -> bool:
     return n in set(LINEAR_NAME_MAP.values()) or n in LINEAR_MODEL_KEYS
 
 
-def select_best_ml_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
+def select_model_performance_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Keep linear/phylo rows; for explore_ml and residual keep only the best
-    (lowest RMSE) model each, renamed for plotting.
+    Keep linear/phylo rows, M0–M4 RF/XGB ML models, and the best residual model.
     """
     work = metrics_df.copy()
     if "model" not in work.columns:
         raise KeyError("metrics_df requires a model column")
 
     linear = work[work["model"].map(_is_linear_model)].copy()
+    ml_spec = work[work["model"].map(_is_ml_spec_model)].copy()
     residual = work[work["model"].map(_is_residual_model)].copy()
-    explore_ml = work[work["model"].map(_is_explore_ml_model)].copy()
-    other = work[
-        ~work["model"].map(lambda m: _is_linear_model(m) or _is_residual_model(m) or _is_explore_ml_model(m))
-    ].copy()
 
-    rows = [linear]
+    rows = [linear, ml_spec]
     if not residual.empty:
         best = residual.sort_values("rmse").iloc[[0]].copy()
         src = str(best["model"].iloc[0])
         best["model"] = f"Residual-best({src.replace('Residual-', '')})"
         rows.append(best)
-    if not explore_ml.empty:
-        best = explore_ml.sort_values("rmse").iloc[[0]].copy()
-        src = str(best["model"].iloc[0])
-        best["model"] = f"ML-best({src})"
-        rows.append(best)
-    if not other.empty:
-        rows.append(other)
 
     out = pd.concat(rows, ignore_index=True)
     out = out.sort_values("rmse").reset_index(drop=True)
     return out.drop(columns=["model_key"], errors="ignore")
+
+
+def select_best_ml_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Backward-compatible alias for model performance plotting."""
+    return select_model_performance_rows(metrics_df)
 
 
 def save_model_performance_plot(
@@ -676,17 +720,17 @@ def save_model_performance_plot(
     out_dir: Path,
     fold_tag: str | None = None,
 ) -> Path:
-    # Comparison plot: linear/phylo + single best residual ML (+ best explore_ml if present)
-    plot_df = select_best_ml_rows(metrics_df)
+    plot_df = select_model_performance_rows(metrics_df)
+    model_order = plot_df["model"].tolist()
     sns.set_theme(style="whitegrid")
-    fig_width = max(10.0, 0.9 * len(plot_df) + 6.0)
+    fig_width = max(12.0, 0.75 * len(plot_df) + 6.0)
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, 6))
 
-    sns.barplot(data=plot_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
+    sns.barplot(data=plot_df, x="model", y="rmse", order=model_order, ax=axes[0], color="#4C72B0")
     axes[0].set_title("RMSE (log10(BMR))")
     axes[0].tick_params(axis="x", rotation=45, labelsize=9)
 
-    sns.barplot(data=plot_df, x="model", y="r2", ax=axes[1], color="#C44E52")
+    sns.barplot(data=plot_df, x="model", y="r2", order=model_order, ax=axes[1], color="#C44E52")
     axes[1].set_title("R2 (log10(BMR))")
     axes[1].tick_params(axis="x", rotation=45, labelsize=9)
 
@@ -742,19 +786,9 @@ def save_top5_plus_residual_learning_plot(
             }
         )
 
-    # Optional: best explore_ml from metrics (already evaluated on this fold).
-    explore_ml = metrics_df[metrics_df["model"].map(_is_explore_ml_model)].copy()
-    ml_rows: list[pd.DataFrame] = []
-    if not explore_ml.empty:
-        best_ml = explore_ml.sort_values("rmse").iloc[[0]].copy()
-        src = str(best_ml["model"].iloc[0])
-        best_ml["model"] = f"ML-best({src})"
-        ml_rows.append(best_ml[["model", "rmse", "mae", "r2"]])
-
     parts = [top_linear[["model", "rmse", "mae", "r2"]]]
     if residual_rows:
         parts.append(pd.DataFrame(residual_rows))
-    parts.extend(ml_rows)
     plot_df = pd.concat(parts, ignore_index=True)
     plot_df = plot_df.drop_duplicates(subset=["model"], keep="first").reset_index(drop=True)
     plot_df = plot_df.sort_values("rmse").reset_index(drop=True)
@@ -1000,6 +1034,7 @@ def main() -> None:
                 benchmark_predictions = load_benchmark_predictions(ml_pred_path, test_df, "test")
             except (ValueError, KeyError) as exc:
                 print(f"[{fold_tag}] Existing explore_ml test predictions are stale: {exc}")
+                benchmark_predictions = None
         if ml_train_pred_path.exists():
             try:
                 benchmark_train_predictions = load_benchmark_predictions(
@@ -1007,6 +1042,7 @@ def main() -> None:
                 )
             except (ValueError, KeyError) as exc:
                 print(f"[{fold_tag}] Existing explore_ml train predictions are stale: {exc}")
+                benchmark_train_predictions = None
         if benchmark_predictions is None or benchmark_train_predictions is None:
             ml_output_dir = _resolve_path(root, args.benchmark_predictions_dir)
             run_python_dependency(

@@ -11,7 +11,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
-from matplotlib import font_manager
 
 
 def find_root(marker: str = ".gitignore") -> Path:
@@ -21,15 +20,6 @@ def find_root(marker: str = ".gitignore") -> Path:
             if (candidate / marker).exists():
                 return candidate
     raise FileNotFoundError(f"Cannot find project root by marker: {marker}")
-
-
-def configure_chinese_font() -> None:
-    available = {font.name for font in font_manager.fontManager.ttflist}
-    for name in ["Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Arial Unicode MS"]:
-        if name in available:
-            plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
-            break
-    plt.rcParams["axes.unicode_minus"] = False
 
 
 def load_current_dataset(split_dir: Path) -> pd.DataFrame:
@@ -77,7 +67,6 @@ def autopct_for_large_slices(values: pd.Series):
 
 
 def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> None:
-    configure_chinese_font()
     colors = list(plt.colormaps["tab20"].colors)
     if len(summary) > len(colors):
         colors = [plt.colormaps["turbo"](i / len(summary)) for i in range(len(summary))]
@@ -104,7 +93,7 @@ def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> No
     ax.legend(
         wedges,
         legend_labels,
-        title="Class · 观测数（占比）",
+        title="Class · observations",
         loc="center left",
         bbox_to_anchor=(1.0, 0.5),
         frameon=False,
@@ -113,12 +102,12 @@ def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> No
         labelspacing=0.65,
         handlelength=1.2,
     )
-    ax.set_title("各 Class 观测量占整个数据集的比例", fontsize=20, weight="bold", pad=18)
+    ax.set_title("observations by class", fontsize=20, weight="bold", pad=18)
     ax.text(
         0.5,
         0.02,
-        f"总计：{summary['observations'].sum():,} 条观测 · "
-        f"{total_species:,} 个物种 · {len(summary)} 个 Class",
+        f"Total: {summary['observations'].sum():,} observations · "
+        f"{total_species:,} species · {len(summary)} classes",
         transform=fig.transFigure,
         ha="center",
         va="bottom",

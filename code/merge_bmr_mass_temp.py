@@ -24,8 +24,11 @@ Output columns (fixed order):
 - temperature_unit
 - Reference
 
-Mass is standardized to kg and BMR to W. Genus/species are kept as parsed
-from source binomials without renaming.
+Mass is standardized to kg. Metabolic rate is kept only when reported in W
+(no kJ/h, kJ/s, mW/kW, or other unit conversions). PNAS rows are restricted
+to Type of Metabolic Rate == Basal; AnimalTraits rows are restricted to
+metabolic rate - method == "basal metabolic rate". Genus/species are kept
+as parsed from source binomials without renaming.
 """
 
 from __future__ import annotations
@@ -190,21 +193,16 @@ def convert_bmr_value_unit_to_w(
     bmr_value: pd.Series, bmr_unit: pd.Series
 ) -> tuple[pd.Series, pd.Series]:
     """
-    Convert metabolic rate to watts.
-    Supported: W, mW, kW, J/s (treated as W).
+    Keep metabolic rate only when the reported unit is watts (W).
+
+    No conversion from mW/kW, J/s, kJ/h, kJ/s, O2 volume rates, or other
+    energy/time units: non-W units are treated as missing.
     """
     value = numeric(bmr_value)
     unit = bmr_unit.map(normalize_bmr_unit)
+    is_w = unit.isin(["w", "watt", "watts"])
 
-    is_w = unit.isin(["w", "js", "j/s"])
-    is_mw = unit.isin(["mw", "milliwatt", "milliwatts"])
-    is_kw = unit.isin(["kw", "kilowatt", "kilowatts"])
-
-    watts = np.where(
-        is_w,
-        value,
-        np.where(is_mw, value / 1000.0, np.where(is_kw, value * 1000.0, np.nan)),
-    )
+    watts = np.where(is_w, value, np.nan)
     unit_out = pd.Series(
         np.where(pd.notna(watts), "W", pd.NA),
         index=bmr_value.index,
@@ -697,6 +695,23 @@ def parse_41586(path: Path) -> pd.DataFrame:
 def parse_pnas(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name="Metabolic_Data")
     df = dedupe_columns(df)
+
+    # Keep basal metabolic rate only (drop Field / Maximum / Dark respiration / etc.).
+    if "Type of Metabolic Rate" not in df.columns:
+        raise KeyError(
+            "PNAS sheet Metabolic_Data is missing required column "
+            "'Type of Metabolic Rate'."
+        )
+    mr_type = df["Type of Metabolic Rate"].astype("string").str.strip()
+    basal_mask = mr_type.str.casefold() == "basal"
+    n_before = len(df)
+    df = df.loc[basal_mask].copy().reset_index(drop=True)
+    print(
+        f"PNAS Type of Metabolic Rate filter: kept {len(df):,}/{n_before:,} "
+        f"Basal rows "
+        f"(dropped {n_before - len(df):,} non-Basal/missing)."
+    )
+
     out = make_output_frame(len(df))
 
     genus_col = df["Genus"] if "Genus" in df.columns else None
@@ -714,20 +729,50 @@ def parse_pnas(path: Path) -> pd.DataFrame:
     out[WET_G_COL] = mass_g
     out[WET_KG_COL] = mass_kg
 
-    # Prefer rate measured at reported temperature T; fall back to 25C-standardized rate.
-    bmr_raw = pd.Series([np.nan] * len(df), dtype="float64")
-    if "Metabolic Rate (W, at T)" in df.columns:
-        bmr_raw = numeric(df["Metabolic Rate (W, at T)"])
-    if "Metabolic Rate (W, at 25C)" in df.columns:
-        bmr_25 = numeric(df["Metabolic Rate (W, at 25C)"])
-        bmr_raw = bmr_raw.where(bmr_raw.notna(), bmr_25)
+    # Prefer Metabolic Rate (W, at T) paired with T (C).
+    # If that pair is incomplete, fall back to Metabolic Rate (W, at 25C)
+    # with temperature fixed at 25 C (Basal rows only; already filtered above).
+    if "Metabolic Rate (W, at T)" not in df.columns:
+        raise KeyError(
+            "PNAS sheet Metabolic_Data is missing required column "
+            "'Metabolic Rate (W, at T)'."
+        )
+    if "T (C)" not in df.columns:
+        raise KeyError(
+            "PNAS sheet Metabolic_Data is missing required column 'T (C)'."
+        )
+    if "Metabolic Rate (W, at 25C)" not in df.columns:
+        raise KeyError(
+            "PNAS sheet Metabolic_Data is missing required column "
+            "'Metabolic Rate (W, at 25C)'."
+        )
+
+    bmr_at_t = numeric(df["Metabolic Rate (W, at T)"])
+    temp_at_t = parse_temperature_series(df["T (C)"])
+    paired_ok = bmr_at_t.notna() & temp_at_t.notna()
+
+    bmr_25 = numeric(df["Metabolic Rate (W, at 25C)"])
+    use_25 = (~paired_ok) & bmr_25.notna()
+
+    bmr_raw = bmr_at_t.where(paired_ok, bmr_25.where(use_25, np.nan))
     bmr_unit_raw = pd.Series(["W"] * len(df), dtype="string")
     out["BMR"], out["BMR_unit"] = convert_bmr_value_unit_to_w(bmr_raw, bmr_unit_raw)
 
-    out["temperature"] = parse_temperature_series(df["T (C)"]) if "T (C)" in df.columns else np.nan
+    out["temperature"] = temp_at_t.where(paired_ok, np.where(use_25, 25.0, np.nan))
     temp_mask = pd.to_numeric(out["temperature"], errors="coerce").notna()
     out["temperature_unit"] = pd.Series("C", index=out.index, dtype="string").where(
         temp_mask, pd.NA
+    )
+    # Rows with neither at-T pair nor 25C rate remain missing.
+    keep_rate = paired_ok | use_25
+    out.loc[~keep_rate, "BMR"] = np.nan
+    out.loc[~keep_rate, "BMR_unit"] = pd.NA
+    out.loc[~keep_rate, "temperature"] = np.nan
+    out.loc[~keep_rate, "temperature_unit"] = pd.NA
+    print(
+        f"PNAS rate/temperature pairing: at-T={int(paired_ok.sum()):,}, "
+        f"25C-fallback={int(use_25.sum()):,}, "
+        f"neither={int((~keep_rate).sum()):,}"
     )
     out["Reference"] = extract_reference_series(df)
     fallback_mask = (
@@ -744,6 +789,24 @@ def parse_pnas(path: Path) -> pd.DataFrame:
 def parse_observations(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name="Observations")
     df = dedupe_columns(df)
+
+    # Keep explicit basal metabolic rate only (drop standard/resting/field/
+    # not specified/missing method labels).
+    if "metabolic rate - method" not in df.columns:
+        raise KeyError(
+            "AnimalTraits sheet Observations is missing required column "
+            "'metabolic rate - method'."
+        )
+    mr_method = df["metabolic rate - method"].astype("string").str.strip()
+    basal_mask = mr_method.str.casefold() == "basal metabolic rate"
+    n_before = len(df)
+    df = df.loc[basal_mask].copy().reset_index(drop=True)
+    print(
+        f"AnimalTraits metabolic rate - method filter: kept {len(df):,}/{n_before:,} "
+        f"'basal metabolic rate' rows "
+        f"(dropped {n_before - len(df):,} non-basal/missing)."
+    )
+
     out = make_output_frame(len(df))
 
     genus_col = df["genus"] if "genus" in df.columns else None

@@ -220,6 +220,20 @@ def main() -> None:
         default=0.01,
         help="Pause between API calls (default: 0.01).",
     )
+    parser.add_argument(
+        "--reuse-taxon-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Optional CSV with Genus/species/taxon_name to reuse prior NCBI mappings. "
+            "Unmapped names still go through pytaxon."
+        ),
+    )
+    parser.add_argument(
+        "--skip-pytaxon",
+        action="store_true",
+        help="Skip pytaxon API calls; use Genus+species (or reused map) as taxon_name.",
+    )
     args = parser.parse_args()
 
     input_path = args.input if args.input.is_absolute() else root / args.input
@@ -258,13 +272,75 @@ def main() -> None:
     unique_names = sorted(raw_taxon_name.unique().tolist())
     print(f"Unique taxa to standardize: {len(unique_names)}", flush=True)
 
-    # Step 2: pytaxon standardization
-    raw_to_standard = standardize_names_with_pytaxon(
-        unique_names,
-        source_id=args.ncbi_source_id,
-        timeout_seconds=args.timeout_seconds,
-        pause_seconds=args.pause_seconds,
-    )
+    raw_to_standard: dict[str, str] = {name: name for name in unique_names}
+    if args.reuse_taxon_csv is not None:
+        reuse_path = (
+            args.reuse_taxon_csv
+            if args.reuse_taxon_csv.is_absolute()
+            else root / args.reuse_taxon_csv
+        )
+        if not reuse_path.exists():
+            raise FileNotFoundError(f"Reuse taxon CSV not found: {reuse_path}")
+        reuse_df = pd.read_csv(reuse_path)
+        needed = {"Genus", "species", "taxon_name"}
+        missing_reuse = needed.difference(reuse_df.columns)
+        if missing_reuse:
+            raise KeyError(
+                f"Reuse CSV missing columns: {', '.join(sorted(missing_reuse))}"
+            )
+        reuse_df = reuse_df.copy()
+        reuse_df["Genus"] = reuse_df["Genus"].astype("string").str.strip()
+        reuse_df["species"] = reuse_df["species"].astype("string").str.strip()
+        reuse_df["taxon_name"] = reuse_df["taxon_name"].astype("string").str.strip()
+        reuse_df["raw_binomial"] = (
+            reuse_df["Genus"] + " " + reuse_df["species"]
+        ).str.strip()
+        reuse_df = reuse_df[
+            reuse_df["raw_binomial"].notna()
+            & (reuse_df["raw_binomial"] != "")
+            & reuse_df["taxon_name"].notna()
+            & (reuse_df["taxon_name"] != "")
+        ]
+        reuse_map = (
+            reuse_df.drop_duplicates(subset=["raw_binomial"], keep="first")
+            .set_index("raw_binomial")["taxon_name"]
+            .to_dict()
+        )
+        hit = 0
+        for name in unique_names:
+            if name in reuse_map:
+                raw_to_standard[name] = reuse_map[name]
+                hit += 1
+        print(f"Reused taxon_name for {hit}/{len(unique_names)} binomials", flush=True)
+
+    need_api = [n for n in unique_names if raw_to_standard.get(n, n) == n]
+    if args.skip_pytaxon:
+        print(
+            f"Skipping pytaxon ({len(need_api)} names keep Genus+species or reused map).",
+            flush=True,
+        )
+    elif need_api and args.reuse_taxon_csv is not None:
+        # Only resolve names that were not covered by the reuse map.
+        unresolved = [n for n in unique_names if n not in reuse_map]
+        if unresolved:
+            print(f"Resolving {len(unresolved)} new taxa via pytaxon", flush=True)
+            api_map = standardize_names_with_pytaxon(
+                unresolved,
+                source_id=args.ncbi_source_id,
+                timeout_seconds=args.timeout_seconds,
+                pause_seconds=args.pause_seconds,
+            )
+            raw_to_standard.update(api_map)
+        else:
+            print("All taxa covered by reuse map; skipping pytaxon.", flush=True)
+    else:
+        # Step 2: pytaxon standardization
+        raw_to_standard = standardize_names_with_pytaxon(
+            unique_names,
+            source_id=args.ncbi_source_id,
+            timeout_seconds=args.timeout_seconds,
+            pause_seconds=args.pause_seconds,
+        )
     standardized_taxon = raw_taxon_name.map(raw_to_standard).fillna(raw_taxon_name)
     df["taxon_name"] = standardized_taxon.values
     # Keep output clean: only append taxon_name as new column.

@@ -1,25 +1,15 @@
-Observations: 5,695
-Species: 1,341
-Classes: 20
+Observations: 5,532
+Species: 1,320
+Classes: 10
 
- rank                class  species_count  observations share_percent
-    1            Teleostei            272          3965        69.62%
-    2             Mammalia            418           488         8.57%
-    3              Insecta            137           263         4.62%
-    4             Reptilia            148           206         3.62%
-    5             Amphibia            132           191         3.35%
-    6         Malacostraca             51           158         2.77%
-    7                 Aves            125           148         2.60%
-    8   Cephalaspidomorphi              4            68         1.19%
-    9            Arachnida             16            53         0.93%
-   10       Chondrichthyes              4            49         0.86%
-   11          Chondrostei              7            46         0.81%
-   12          Maxillopoda              5            17         0.30%
-   13          Cephalopoda             14            14         0.25%
-   14         Branchiopoda              2            13         0.23%
-   15 Dipnotetrapodomorpha              1            10         0.18%
-   16               Myxini              1             2         0.04%
-   17            Cladistei              1             1         0.02%
-   18             Hydrozoa              1             1         0.02%
-   19          Sagittoidea              1             1         0.02%
-   20            Scyphozoa              1             1         0.02%
+ rank        class  species_count  observations share_percent
+    1    Teleostei            272          3965        71.67%
+    2     Mammalia            418           488         8.82%
+    3      Insecta            137           263         4.75%
+    4     Reptilia            148           206         3.72%
+    5     Amphibia            132           191         3.45%
+    6 Malacostraca             51           158         2.86%
+    7         Aves            125           148         2.68%
+    8    Arachnida             16            53         0.96%
+    9  Chondrostei              7            46         0.83%
+   10  Cephalopoda             14            14         0.25%
