@@ -155,6 +155,41 @@ def is_allowed_class(class_name: str, *, allow_empty: bool = False) -> bool:
     return c in KEEP_CLASSES
 
 
+def drop_classes_below_min_species(
+    df: pd.DataFrame,
+    *,
+    min_species: int = 7,
+    species_col: str | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Drop classes with fewer than `min_species` unique species.
+
+    Species are counted by `taxon_name` when present, otherwise by Genus+species.
+    """
+    out = df.copy()
+    if species_col is None:
+        if "taxon_name" in out.columns:
+            species = out["taxon_name"].astype("string").str.strip()
+        else:
+            species = (
+                out["Genus"].astype("string").str.strip().fillna("")
+                + " "
+                + out["species"].astype("string").str.strip().fillna("")
+            ).str.strip()
+    else:
+        species = out[species_col].astype("string").str.strip()
+
+    tmp = out.copy()
+    tmp["_species_key"] = species
+    tmp = tmp[tmp["_species_key"].notna() & (tmp["_species_key"] != "")]
+    species_per_class = tmp.groupby("class", dropna=False)["_species_key"].nunique()
+    drop_classes = species_per_class[species_per_class < min_species].index.tolist()
+    drop_classes = [str(c) for c in drop_classes]
+    if drop_classes:
+        out = out[~out["class"].astype(str).isin(drop_classes)].copy()
+    return out.reset_index(drop=True), sorted(drop_classes)
+
+
 def ensure_wet_mass_g(df: pd.DataFrame) -> pd.DataFrame:
     """Derive wet_Mass_g from wet_Mass_kg when only kg is present (merged schema)."""
     out = df.copy()
@@ -179,9 +214,8 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Filter taxa in two steps: "
-            "(1) keep whitelist classes only, "
-            "(2) standardize names via pytaxon and write filtered outputs."
+            "Filter taxa: keep whitelist classes, drop classes with fewer than "
+            "N species, standardize names via pytaxon, and write filtered outputs."
         )
     )
     parser.add_argument(
@@ -234,6 +268,16 @@ def main() -> None:
         action="store_true",
         help="Skip pytaxon API calls; use Genus+species (or reused map) as taxon_name.",
     )
+    parser.add_argument(
+        "--min-species-per-class",
+        type=int,
+        default=7,
+        help=(
+            "After the class whitelist, drop classes with fewer than this many "
+            "unique Genus+species before taxonomy standardization / phylogeny "
+            "(default: 7)."
+        ),
+    )
     args = parser.parse_args()
 
     input_path = args.input if args.input.is_absolute() else root / args.input
@@ -267,6 +311,40 @@ def main() -> None:
     # Keep rows with explicit genus/species before species-level counting.
     df = df[df["Genus"].notna() & (df["Genus"] != "") & df["species"].notna() & (df["species"] != "")]
     df = df.copy()
+
+    # Drop sparse classes before taxon standardization and phylogeny PCs.
+    rows_before_min_species = len(df)
+    df, dropped_sparse = drop_classes_below_min_species(
+        df, min_species=args.min_species_per_class
+    )
+    if dropped_sparse:
+        print(
+            f"Dropped classes with fewer than {args.min_species_per_class} species: "
+            + ", ".join(dropped_sparse),
+            flush=True,
+        )
+        print(
+            f"Rows after min-species filter: {len(df)} "
+            f"(removed {rows_before_min_species - len(df)})",
+            flush=True,
+        )
+    else:
+        print(
+            f"No classes below {args.min_species_per_class} species; "
+            f"rows unchanged: {len(df)}",
+            flush=True,
+        )
+    if df.empty:
+        raise ValueError(
+            f"No rows left after dropping classes with fewer than "
+            f"{args.min_species_per_class} species."
+        )
+    print(
+        "Remaining classes after min-species filter: "
+        f"{sorted(df['class'].dropna().astype(str).unique().tolist())}",
+        flush=True,
+    )
+
     raw_taxon_name = (df["Genus"] + " " + df["species"]).str.strip()
 
     unique_names = sorted(raw_taxon_name.unique().tolist())

@@ -262,16 +262,8 @@ def main() -> None:
     if out.empty:
         raise ValueError("No valid rows left after filtering required columns.")
 
-    species_per_class = out.groupby("class")["taxon_name"].nunique()
-    drop_classes = species_per_class[species_per_class < 7].index.tolist()
-    if drop_classes:
-        out = out[~out["class"].isin(drop_classes)].copy().reset_index(drop=True)
-        print(
-            "Dropped classes with fewer than 7 species: "
-            + ", ".join(str(c) for c in sorted(drop_classes))
-        )
-    if out.empty:
-        raise ValueError("No rows left after dropping classes with fewer than 7 species.")
+    # Classes with fewer than 7 species are removed earlier in
+    # filter_target_classes.py (after whitelist, before phylogeny PCs).
 
     cv_species, holdout, summary = assign_species_to_buckets(out, random_state=args.seed)
     included_classes = set(summary.loc[summary["included"], "class"].astype(str))

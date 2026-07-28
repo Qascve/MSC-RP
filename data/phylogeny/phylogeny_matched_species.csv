@@ -231,13 +231,6 @@ Conger conger
 Petrocephalus catostoma
 Gnathonemus petersii
 Arapaima gigas
-Acipenser transmontanus
-Acipenser nudiventris
-Acipenser gueldenstaedtii
-Acipenser ruthenus
-Acipenser stellatus
-Polyodon spathula
-Erpetoichthys calabaricus
 Boulengerula taitana
 Geotrypetes seraphini
 Typhlonectes compressicauda
@@ -1157,7 +1150,7 @@ Uria lomvia
 Stercorarius skua
 Turnix suscitator
 Thinocorus rumicivorus
-Scolopax rusticola
+Scolopax minor
 Calidris canutus
 Arenaria interpres
 Tringa ochropus
@@ -1174,7 +1167,7 @@ Columba palumbus
 Leptotila verreauxi
 Zenaida macroura
 Leucosarcia melanoleuca
-Phaps chalcoptera
+Phaps histrionica
 Ocyphaps lophotes
 Phoenicopterus ruber
 Merops viridis
@@ -1183,7 +1176,7 @@ Melanerpes formicivorus
 Upupa epops
 Phoeniculus purpureus
 Trogon rufus
-Colius colius
+Colius striatus
 Otus scops
 Megascops asio
 Megascops trichopsis
@@ -1406,12 +1399,6 @@ Crax alberti
 Pseudemys scripta
 Terrapene ornata
 Chelydra serpentina
-Protopterus annectens
-Myxine glutinosa
-Ichthyomyzon fossor
-Petromyzon marinus
-Lampetra fluviatilis
-Lampetra planeri
 Karoophasma biedouwense
 Rhyparobia maderae
 Nauphoeta cinerea
@@ -1462,7 +1449,7 @@ Camponotus vafer
 Camponotus laevigatus
 Camponotus vicinus
 Cataglyphis bicolor
-Lasius alienus
+Lasius niger
 Eciton hamatum
 Paraponera clavata
 Leptogenys attenuata
@@ -1617,5 +1604,4 @@ Octopus rubescens
 Japetella diaphana
 Enteroctopus dofleini
 Vampyroteuthis infernalis
-Atolla vanhoeffeni
 Aglantha digitale

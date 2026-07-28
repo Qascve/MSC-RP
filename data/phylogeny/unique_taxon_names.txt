@@ -716,7 +716,6 @@ Uca pugnas
 Uca rapax
 Uca thayeri
 Xantho hydrophilus
-Acipenser transmontanus
 Anabas testudineus
 Anarhichas minor
 Anguilla anguilla
@@ -767,10 +766,6 @@ Trematomus pennellii
 Trichogaster trichopterus
 Abramis brama
 Acanthopagrus schlegelii
-Acipenser gueldenstaedtii
-Acipenser nudiventris
-Acipenser ruthenus
-Acipenser stellatus
 Aequidens pulcher
 Alburnus alburnus
 Ambassis interrupta
@@ -825,7 +820,6 @@ Encheliophis homei
 Engraulis japonicus
 Epinephelus akaara
 Erimyzon oblongus
-Erpetoichthys calabaricus
 Esomus danricus
 Esox lucius
 Esox masquinongy
@@ -855,7 +849,6 @@ Heteropneustes fossilis
 Hippocampus hippocampus
 Hippoglossoides platessoides
 Hoplerythrinus unitaeniatus
-Ichthyomyzon fossor
 Ictalurus punctatus
 Katsuwonus pelamis
 Kuhlia sandvicensis
@@ -865,8 +858,6 @@ Labeo rohita
 Labeobarbus aeneus
 Labrus bergylta
 Lagodon rhomboides
-Lampetra fluviatilis
-Lampetra planeri
 Leiostomus xanthurus
 Lepidocephalichthys guntea
 Lepomis cyanellus
@@ -902,7 +893,6 @@ Mystus armatus
 Mystus cavasius
 Mystus gulio
 Mystus vittatus
-Myxine glutinosa
 Nannobrachium regale
 Nannobrachium ritteri
 Notothenia rossii
@@ -922,7 +912,6 @@ Parophrys vetulus
 Parvilux ingens
 Perca fluviatilis
 Petrocephalus catostoma
-Petromyzon marinus
 Pimephales promelas
 Platichthys flesus
 Platichthys stellatus
@@ -930,11 +919,9 @@ Plecoglossus altivelis
 Pleuronectes platessa
 Poecilia latipinna
 Pollachius pollachius
-Polyodon spathula
 Pomadasys commersonnii
 Pomoxis annularis
 Poromitra crassiceps
-Protopterus annectens
 Pseudobathylagus milleri
 Pseudopleuronectes americanus
 Pterophyllum scalare
@@ -990,8 +977,6 @@ Xiphophorus hellerii
 Zoarces viviparus
 Aegina citrea
 Aglantha digitale
-Atolla vanhoeffeni
-Atolla wyvillei
 Botrynema brucei
 Caeosagitta macrocephala
 Colobenema sericeum
@@ -1007,11 +992,8 @@ Haliscera bigelowi
 Halitrephes maasi
 Heterokrohnia murina
 Leukartiara octona
-Nausithoe rubra
-Paraphyllina ransoni
 Parasagitta elegans
 Parasagitta euneritica
-Periphylla peryphylla
 Pseudosagitta gazellae
 Pseudosagitta lyra
 Pseudosagitta maxima
@@ -1324,7 +1306,6 @@ Teleogryllus commodus
 Tenebrio molitor
 Termes borneensis
 Tetramorium caespitum
-Thais cassandra
 Thermophilum babaulti
 Thermophilum hexastictum
 Trachysomus peregrinus
@@ -1992,7 +1973,6 @@ Brachyscelus latipes
 Byblis securiger
 Cylisticus convexus
 Cyphocaris richardi
-Cypridina hilgendorfii
 Dikerogammarus haemobaphes
 Djerboa furcipes
 Eurymera monticulosa
@@ -2004,8 +1984,6 @@ Gammarus locusta
 Gammarus oceanicus
 Gammarus salinus
 Gammarus zaddachi
-Gigantocypris agassizii
-Gigantocypris mulleri
 Glyptonotus antarcticus
 Gnathophausia gracilis
 Gnathophausia zoea

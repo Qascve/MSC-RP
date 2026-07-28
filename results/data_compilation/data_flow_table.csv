@@ -1,5 +1,4 @@
-﻿stage,records,unique_species,classes,notes
-04_after_merge_core_filter_dedup,6671,2364,21,Merged three sources; required Genus/species/mass/BMR/temperature; exact-row dedup; GBIF taxonomy fill
-05_after_class_whitelist_taxon_standardise,6671,2364,21,Restricted to animal KEEP_CLASSES; NCBI/pytaxon taxon_name added
-06_after_phylogeny_embedding_join,5279,1620,19,Inner join to phylogenetic PC1-PC5 embeddings by taxon_name
-07_after_modeling_filters_min7_species,5077,1594,8,Positive mass/BMR; valid T; drop classes with <7 species; train+test fixed split
+﻿stage,unique_species,classes
+after_merge_dedup_dropna,2364,21
+after_drop_classes_lt7_species,2342,13
+after_phylogeny_join_drop_classes_lt7_species,1594,8

@@ -48,12 +48,37 @@ def load_filtered_data(path: Path) -> pd.DataFrame:
     return df
 
 
+def drop_classes_below_min_species(
+    df: pd.DataFrame,
+    *,
+    min_species: int = 7,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Drop classes with fewer than `min_species` unique taxon_name values."""
+    out = df.copy()
+    if "class" not in out.columns:
+        raise KeyError("Merged frame missing required column: class")
+    if "taxon_name" not in out.columns:
+        raise KeyError("Merged frame missing required column: taxon_name")
+
+    out["class"] = out["class"].astype("string").str.strip()
+    out["taxon_name"] = out["taxon_name"].astype("string").str.strip()
+    valid = out[out["taxon_name"].notna() & (out["taxon_name"] != "")]
+    species_per_class = valid.groupby("class", dropna=False)["taxon_name"].nunique()
+    drop_classes = [
+        str(c) for c in species_per_class[species_per_class < min_species].index.tolist()
+    ]
+    if drop_classes:
+        out = out[~out["class"].astype(str).isin(drop_classes)].copy()
+    return out.reset_index(drop=True), sorted(drop_classes)
+
+
 def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
             "Merge phylogenetic PCA embeddings with filtered observations by taxon_name. "
-            "Keep only taxa present in embedding file."
+            "Keep only taxa present in embedding file, then drop classes with fewer than "
+            "N unique species."
         )
     )
     parser.add_argument(
@@ -74,6 +99,15 @@ def main() -> None:
         default=Path("data/merge_phylo.csv"),
         help="Output merged CSV path (default: data/merge_phylo.csv).",
     )
+    parser.add_argument(
+        "--min-species-per-class",
+        type=int,
+        default=7,
+        help=(
+            "After phylogeny join, drop classes with fewer than this many unique "
+            "taxon_name values (default: 7)."
+        ),
+    )
     args = parser.parse_args()
 
     emb_path = args.embeddings if args.embeddings.is_absolute() else root / args.embeddings
@@ -93,6 +127,29 @@ def main() -> None:
     filtered_base = filtered.drop(columns=[c for c in pc_cols if c in filtered.columns]).copy()
     merged = filtered_base.merge(emb, on="taxon_name", how="inner", validate="many_to_one")
     merged = merged[[*filtered_base.columns, *pc_cols]]
+    rows_after_join = len(merged)
+
+    merged, dropped_sparse = drop_classes_below_min_species(
+        merged, min_species=args.min_species_per_class
+    )
+    if dropped_sparse:
+        print(
+            f"Dropped classes with fewer than {args.min_species_per_class} species "
+            f"after phylogeny join: " + ", ".join(dropped_sparse)
+        )
+        print(
+            f"Rows after post-join min-species filter: {len(merged)} "
+            f"(removed {rows_after_join - len(merged)})"
+        )
+    else:
+        print(
+            f"No classes below {args.min_species_per_class} species after phylogeny join."
+        )
+    if merged.empty:
+        raise ValueError(
+            f"No rows left after dropping classes with fewer than "
+            f"{args.min_species_per_class} species."
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(out_path, index=False, encoding="utf-8")
@@ -100,9 +157,14 @@ def main() -> None:
     print(f"Saved: {out_path}")
     print(f"Embedding taxa: {len(emb)}")
     print(f"number of rows input: {len(filtered)}")
+    print(f"number of rows after phylogeny join: {rows_after_join}")
     print(f"number of rows output: {len(merged)}")
     print(f"rows with matched pc1-5: {int(merged['pc1'].notna().sum())}")
-    print(f"rows removed (no embedding match): {len(filtered) - len(merged)}")
+    print(f"rows removed (no embedding match): {len(filtered) - rows_after_join}")
+    print(
+        "Remaining classes: "
+        + ", ".join(sorted(merged["class"].dropna().astype(str).unique().tolist()))
+    )
 
 
 if __name__ == "__main__":
