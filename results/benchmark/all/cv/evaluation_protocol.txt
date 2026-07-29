@@ -1,0 +1,3 @@
+Residual-learning OOF evaluation protocol
+Weight formula: w_c = n / (n_classes * n_c) with sklearn class_weight='balanced' (n = training rows; n_c = rows in class c).
+rmse/mae/r2=micro; *_macro=equal-class mean; *_bal=balanced weights.

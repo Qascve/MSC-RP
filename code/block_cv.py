@@ -610,7 +610,7 @@ def main() -> None:
     parser.add_argument("--split-dir", type=Path, default=Path("data/splits/block_cv"))
     parser.add_argument("--results-dir", type=Path, default=Path("results/block_cv"))
     parser.add_argument("--n-splits", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--skip-models",
         action="store_true",

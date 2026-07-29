@@ -1,15 +1,13 @@
-Observations: 5,532
-Species: 1,320
-Classes: 10
+Observations: 5,077
+Species: 1,594
+Classes: 8
 
  rank        class  species_count  observations share_percent
-    1    Teleostei            272          3965        71.67%
-    2     Mammalia            418           488         8.82%
-    3      Insecta            137           263         4.75%
-    4     Reptilia            148           206         3.72%
-    5     Amphibia            132           191         3.45%
-    6 Malacostraca             51           158         2.86%
-    7         Aves            125           148         2.68%
-    8    Arachnida             16            53         0.96%
-    9  Chondrostei              7            46         0.83%
-   10  Cephalopoda             14            14         0.25%
+    1    Teleostei            229          2778        54.72%
+    2     Mammalia            615          1422        28.01%
+    3         Aves            315           357         7.03%
+    4      Insecta            133           134         2.64%
+    5 Malacostraca             50           133         2.62%
+    6     Amphibia            124           124         2.44%
+    7     Reptilia            114           115         2.27%
+    8  Cephalopoda             14            14         0.28%

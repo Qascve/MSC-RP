@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.utils.class_weight import compute_class_weight
 
 TARGET = "BMR"
 MASS_COL = "wet_Mass_kg"
@@ -19,7 +20,7 @@ TEMP_COL = "temperature"
 CLADE_COL = "class"
 K_BOLTZMANN_EV_PER_K = 8.617e-5
 PHYLO_PC_COLS = ["pc1", "pc2", "pc3", "pc4", "pc5"]
-ML_MODEL_SUFFIXES = ("m0", "m1", "m2", "m3", "m4")
+ML_MODEL_SUFFIXES = ("m1", "m2", "m3", "m4")
 LINEAR_NAME_MAP = {
     "m0_fixed_b_3_4": "M0-L",
     "m1_estimated_b": "M1-L",
@@ -89,8 +90,37 @@ def add_mte_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def fit_ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
+    """Same class-balanced row weights as ml_residual_learning XGB/RF."""
+    classes = train_df[CLADE_COL].to_numpy()
+    unique_classes = np.unique(classes)
+    class_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=unique_classes,
+        y=classes,
+    )
+    weight_map = dict(zip(unique_classes, class_weights))
+    return np.array([weight_map[c] for c in classes], dtype=float)
+
+
+def fit_ols(
+    X: np.ndarray,
+    y: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> np.ndarray:
+    """Ordinary or weighted least squares (WLS via row scaling)."""
+    if sample_weight is None:
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        return coef
+    sw = np.asarray(sample_weight, dtype=float)
+    if sw.shape != (len(y),):
+        raise ValueError(
+            f"sample_weight shape {sw.shape} does not match y length {len(y)}."
+        )
+    if np.any(sw < 0) or not np.all(np.isfinite(sw)):
+        raise ValueError("sample_weight must be finite and non-negative.")
+    scale = np.sqrt(sw)
+    coef, *_ = np.linalg.lstsq(X * scale[:, None], y * scale, rcond=None)
     return coef
 
 
@@ -151,7 +181,7 @@ def build_design_m4(df: pd.DataFrame, pc_cols: list[str] | None = None) -> tuple
 
 
 def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
-    """Evaluate on log10(BMR) only."""
+    """Micro-averaged metrics on pooled log10(BMR) observations."""
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
     y_true_log = np.asarray(y_true_log, dtype=float)[mask]
     y_pred_log = np.asarray(y_pred_log, dtype=float)[mask]
@@ -168,6 +198,95 @@ def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]
         "mae": float(mean_absolute_error(y_true_log, y_pred_log)),
         "r2": _r2(y_true_log, y_pred_log),
     }
+
+
+def evaluate_weighted(
+    y_true_log: np.ndarray,
+    y_pred_log: np.ndarray,
+    sample_weight: np.ndarray,
+) -> dict[str, float]:
+    """Class-balanced weighted RMSE/MAE/R2 on log10(BMR)."""
+    y_true_log = np.asarray(y_true_log, dtype=float)
+    y_pred_log = np.asarray(y_pred_log, dtype=float)
+    sw = np.asarray(sample_weight, dtype=float)
+    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log) & np.isfinite(sw) & (sw > 0)
+    y_true_log = y_true_log[mask]
+    y_pred_log = y_pred_log[mask]
+    sw = sw[mask]
+    if len(y_true_log) == 0:
+        return {"rmse_bal": np.nan, "mae_bal": np.nan, "r2_bal": np.nan}
+    resid = y_true_log - y_pred_log
+    w_sum = float(np.sum(sw))
+    rmse = float(np.sqrt(np.sum(sw * resid**2) / w_sum))
+    mae = float(np.sum(sw * np.abs(resid)) / w_sum)
+    y_bar = float(np.sum(sw * y_true_log) / w_sum)
+    ss_tot = float(np.sum(sw * (y_true_log - y_bar) ** 2))
+    ss_res = float(np.sum(sw * resid**2))
+    r2 = float("nan") if ss_tot <= 0 else float(1.0 - ss_res / ss_tot)
+    return {"rmse_bal": rmse, "mae_bal": mae, "r2_bal": r2}
+
+
+def evaluate_macro_by_class(
+    y_true_log: np.ndarray,
+    y_pred_log: np.ndarray,
+    classes: np.ndarray,
+) -> dict[str, float]:
+    """Unweighted mean of per-class micro metrics (each class counts equally)."""
+    y_true_log = np.asarray(y_true_log, dtype=float)
+    y_pred_log = np.asarray(y_pred_log, dtype=float)
+    classes = np.asarray(classes)
+    rows = []
+    for cls in sorted(pd.unique(classes)):
+        mask = classes == cls
+        if not bool(np.any(mask)):
+            continue
+        rows.append(evaluate(y_true_log[mask], y_pred_log[mask]))
+    if not rows:
+        return {
+            "rmse_macro": np.nan,
+            "mae_macro": np.nan,
+            "r2_macro": np.nan,
+            "n_classes_eval": 0,
+        }
+    return {
+        "rmse_macro": float(np.nanmean([r["rmse"] for r in rows])),
+        "mae_macro": float(np.nanmean([r["mae"] for r in rows])),
+        "r2_macro": float(np.nanmean([r["r2"] for r in rows])),
+        "n_classes_eval": int(len(rows)),
+    }
+
+
+def evaluate_reporting_suite(
+    y_true_log: np.ndarray,
+    y_pred_log: np.ndarray,
+    classes: np.ndarray,
+) -> dict[str, float]:
+    """
+    Report micro (pooled), macro (per-class then equal-average), and
+    class-balanced weighted metrics using the same w_c formula as training.
+    """
+    y_true_log = np.asarray(y_true_log, dtype=float)
+    y_pred_log = np.asarray(y_pred_log, dtype=float)
+    classes = np.asarray(classes)
+    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
+    y_true_log = y_true_log[mask]
+    y_pred_log = y_pred_log[mask]
+    classes = classes[mask]
+    micro = evaluate(y_true_log, y_pred_log)
+    macro = evaluate_macro_by_class(y_true_log, y_pred_log, classes)
+    if len(classes) == 0:
+        bal = {"rmse_bal": np.nan, "mae_bal": np.nan, "r2_bal": np.nan}
+    else:
+        unique = np.unique(classes)
+        class_weights = compute_class_weight(
+            class_weight="balanced",
+            classes=unique,
+            y=classes,
+        )
+        weight_map = dict(zip(unique, class_weights))
+        sw = np.array([weight_map[c] for c in classes], dtype=float)
+        bal = evaluate_weighted(y_true_log, y_pred_log, sw)
+    return {**micro, **macro, **bal}
 
 
 def to_short_model_name(model_name: str) -> str:
@@ -192,6 +311,21 @@ LINEAR_MODEL_KEYS = (
     "m4_phylo_linear_mte",
     "m4_pgls_ape_mte",
 )
+# Models trained with class-balanced sample weights (same formula as residual XGB/RF).
+CLASS_WEIGHTED_TRAIN_MODELS = {
+    "m3_clade_specific_mte",
+    "m4_phylo_linear_mte",
+    "Residual-RF",
+    "Residual-XGB",
+    # explore_ml RF/XGB M1–M4
+    *[f"random_forest_m{i}" for i in (1, 2, 3, 4)],
+    *[f"xgboost_m{i}" for i in (1, 2, 3, 4)],
+}
+CLASS_BALANCED_WEIGHT_FORMULA = (
+    "w_c = n / (n_classes * n_c), where n is the number of training rows, "
+    "n_classes is the number of taxonomic classes present, and n_c is the "
+    "number of training rows in class c (sklearn class_weight='balanced')."
+)
 
 
 def load_benchmark_predictions(path: Path, eval_df: pd.DataFrame, split_label: str = "test") -> dict[str, np.ndarray]:
@@ -209,7 +343,7 @@ def load_benchmark_predictions(path: Path, eval_df: pd.DataFrame, split_label: s
         raise KeyError(f"{path.name} missing required columns: {', '.join(missing)}")
     if len(benchmark_cols) == 0:
         raise KeyError(
-            f"{path.name} missing ML model columns like random_forest_m0..m4/xgboost_m0..m4."
+            f"{path.name} missing ML model columns like random_forest_m1..m4/xgboost_m1..m4."
         )
 
     for col in required:
@@ -251,19 +385,54 @@ def load_residual_learning_predictions(path: Path, eval_df: pd.DataFrame, split_
 
     for col in ["y_true", *model_cols]:
         pred_df[col] = pd.to_numeric(pred_df[col], errors="coerce")
+    if "log_mass" in pred_df.columns:
+        pred_df["log_mass"] = pd.to_numeric(pred_df["log_mass"], errors="coerce")
+    if "inv_kT" in pred_df.columns:
+        pred_df["inv_kT"] = pd.to_numeric(pred_df["inv_kT"], errors="coerce")
     pred_df = pred_df.dropna(subset=["y_true", *model_cols]).reset_index(drop=True)
 
     y_true = eval_df["log_BMR"].to_numpy()
-    if len(pred_df) != len(eval_df):
+    aligned = False
+    if (
+        len(pred_df) == len(eval_df)
+        and np.allclose(pred_df["y_true"].to_numpy(), y_true, rtol=1e-10, atol=1e-12)
+    ):
+        aligned = True
+    elif {
+        "taxon_name",
+        "log_mass",
+        "inv_kT",
+    }.issubset(pred_df.columns) and {
+        "taxon_name",
+        "log_mass",
+        "inv_kT",
+    }.issubset(eval_df.columns):
+        # CV OOF rows may be ordered by fold; align back onto eval_df row order.
+        left = eval_df[["taxon_name", "log_mass", "inv_kT"]].copy().reset_index(drop=True)
+        left["_row_id"] = np.arange(len(left))
+        left["y_true"] = y_true
+        right = pred_df[
+            ["taxon_name", "log_mass", "inv_kT", "y_true", *model_cols]
+        ].copy()
+        merged = left.merge(
+            right,
+            on=["taxon_name", "log_mass", "inv_kT", "y_true"],
+            how="left",
+            validate="one_to_one",
+        ).sort_values("_row_id")
+        if merged[model_cols].isna().any().any():
+            raise ValueError(
+                f"Residual-learning predictions could not be aligned to {split_label} split "
+                f"({path}). Please rerun ml_residual_learning.py on the same split files."
+            )
+        pred_df = merged.reset_index(drop=True)
+        aligned = True
+
+    if not aligned:
         raise ValueError(
-            f"Residual-learning predictions row count mismatches {split_label} split "
+            f"Residual-learning predictions are not aligned with current {split_label} split "
             f"({path}: {len(pred_df)} rows vs {split_label} {len(eval_df)}). "
             "Please rerun ml_residual_learning.py on the same train/test files."
-        )
-    if not np.allclose(pred_df["y_true"].to_numpy(), y_true, rtol=1e-10, atol=1e-12):
-        raise ValueError(
-            f"Residual-learning predictions y_true is not aligned with current {split_label} split. "
-            "Please rerun ml_residual_learning.py on the same split file."
         )
 
     name_map = {"random_forest": "Residual-RF", "xgboost": "Residual-XGB"}
@@ -450,20 +619,77 @@ def _build_model_metrics(
     comparison_mask: np.ndarray | None = None,
 ) -> pd.DataFrame:
     y_true = eval_df["log_BMR"].to_numpy()
+    classes = eval_df[CLADE_COL].astype(str).to_numpy()
     if comparison_mask is None:
         comparison_mask = np.ones(len(eval_df), dtype=bool)
     metric_rows = []
+    empty_extra = {
+        "rmse_macro": np.nan,
+        "mae_macro": np.nan,
+        "r2_macro": np.nan,
+        "n_classes_eval": np.nan,
+        "rmse_bal": np.nan,
+        "mae_bal": np.nan,
+        "r2_bal": np.nan,
+    }
     for model_name, y_pred in sorted(predictions.items()):
+        y_t = y_true[comparison_mask]
+        y_p = y_pred[comparison_mask]
+        # Macro / class-balanced metrics only for models trained with class weights.
+        # Unweighted models (M0/M1/M2 linear, PGLS) keep micro rmse/mae/r2 only.
+        if model_name in CLASS_WEIGHTED_TRAIN_MODELS:
+            suite = evaluate_reporting_suite(y_t, y_p, classes[comparison_mask])
+        else:
+            suite = {**evaluate(y_t, y_p), **empty_extra}
         metric_rows.append(
             {
                 "model": model_name,
-                **evaluate(y_true[comparison_mask], y_pred[comparison_mask]),
+                "train_class_weighted": int(model_name in CLASS_WEIGHTED_TRAIN_MODELS),
+                **suite,
             }
         )
     metrics_df = pd.DataFrame(metric_rows).sort_values("rmse").reset_index(drop=True)
     metrics_df["model_key"] = metrics_df["model"]
     metrics_df["model"] = metrics_df["model"].map(to_short_model_name)
     return metrics_df
+
+
+def write_evaluation_protocol_note(out_dir: Path) -> Path:
+    """Document split terminology and class-balanced weight / metric definitions."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "evaluation_protocol.txt"
+    text = "\n".join(
+        [
+            "Evaluation protocol (explore.py)",
+            "",
+            "Partitioning:",
+            "- The held-out 20% test bucket is a species-blocked holdout, not by itself",
+            "  'cross-validation'. Residual-learning hyper-parameters use a separate",
+            "  fixed 4-fold species-blocked CV inside the 80% development set; all",
+            "  models are compared on the same held-out test partition.",
+            "- Stratification: within each taxonomic class, whole species are assigned",
+            "  to F1/F2/F3/F4/T (~20% each) with per-class quotas; remainder slots go",
+            "  to currently lightest buckets so small classes still cover as many",
+            "  buckets as their species count allows.",
+            "- Classes with fewer than 5 species cannot occupy every bucket; some",
+            "  folds/test may lack that class. Classes kept in the working data with",
+            "  enough species are represented across buckets when n_species >= 5.",
+            "",
+            "Class-balanced sample weights (training for M3-L, M4-L, Residual-RF/XGB,",
+            "  and explore_ml RF/XGB M1–M4):",
+            f"- {CLASS_BALANCED_WEIGHT_FORMULA}",
+            "",
+            "Reported metrics:",
+            "- rmse/mae/r2: micro-averaged over all pooled evaluation rows (all models)",
+            "- rmse_macro/mae_macro/r2_macro and rmse_bal/mae_bal/r2_bal: only for",
+            "  models trained with class-balanced weights (M3-L, M4-L, Residual-RF/XGB,",
+            "  explore_ml M1–M4 RF/XGB)",
+            "- train_class_weighted=1 marks those models",
+            "",
+        ]
+    )
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def run_models(
@@ -477,6 +703,8 @@ def run_models(
     residual_train_predictions: dict[str, np.ndarray],
 ) -> tuple[pd.DataFrame, dict[str, np.ndarray], np.ndarray, pd.DataFrame, dict[str, np.ndarray], np.ndarray]:
     y_train_log = train_df["log_BMR"].to_numpy()
+    # Same class-balanced weights as residual-learning XGB/RF.
+    sw_train = make_class_balanced_sample_weight(train_df)
 
     # m0: log_BMR ~ offset(0.75 * log_mass)
     alpha_m0 = float(np.mean(y_train_log - 0.75 * train_df["log_mass"].to_numpy()))
@@ -509,7 +737,7 @@ def run_models(
     yhat_m2_train = predict_ols(X2_train, coef_m2)
     yhat_m2_log = predict_ols(X2_test, coef_m2)
 
-    # m3: log_BMR ~ log_mass + inv_kT + class
+    # m3: log_BMR ~ log_mass + inv_kT + class  (class-balanced WLS)
     # class is treatment-coded as a categorical predictor.
     clade_levels = sorted(train_df[CLADE_COL].dropna().unique().tolist())
     if not clade_levels:
@@ -524,14 +752,14 @@ def run_models(
     test_df_m3 = test_df[known_mask].copy()
     X3_train, names_m3 = build_design_m3(train_df, clade_levels)
     X3_test, _ = build_design_m3(test_df_m3, clade_levels)
-    coef_m3 = fit_ols(X3_train, y_train_log)
+    coef_m3 = fit_ols(X3_train, y_train_log, sample_weight=sw_train)
     yhat_m3_train = predict_ols(X3_train, coef_m3)
     yhat_m3_log = predict_ols(X3_test, coef_m3)
 
-    # m4: log_BMR ~ (log_mass + inv_kT) * phylogeny (PC1-5 linear interactions)
+    # m4: log_BMR ~ (log_mass + inv_kT) * phylogeny  (class-balanced WLS)
     X4_train, _ = build_design_m4(train_df)
     X4_test, _ = build_design_m4(test_df)
-    coef_m4 = fit_ols(X4_train, y_train_log)
+    coef_m4 = fit_ols(X4_train, y_train_log, sample_weight=sw_train)
     yhat_m4_train = predict_ols(X4_train, coef_m4)
     yhat_m4_log = predict_ols(X4_test, coef_m4)
 
@@ -656,58 +884,18 @@ def write_linear_metrics_by_fold(out_dir: Path, fold_tags: list[str]) -> Path:
     return out_path
 
 
-def _is_explore_ml_model(name: str) -> bool:
-    n = str(name)
-    return (
-        n.startswith("random_forest_")
-        or n.startswith("xgboost_")
-        or n.endswith("-RF")
-        or n.endswith("-XGB")
-    ) and not n.startswith("Residual")
-
-
-def _is_ml_spec_model(name: str) -> bool:
-    n = str(name)
-    if n.startswith("Residual"):
-        return False
-    for spec in ML_MODEL_SUFFIXES:
-        tier = f"M{spec[-1]}"
-        if n in (f"{tier}-RF", f"{tier}-XGB"):
-            return True
-    return False
-
-
-def _is_residual_model(name: str) -> bool:
-    return str(name).startswith("Residual")
-
-
 def _is_linear_model(name: str) -> bool:
     n = str(name)
     return n in set(LINEAR_NAME_MAP.values()) or n in LINEAR_MODEL_KEYS
 
 
 def select_model_performance_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Keep linear/phylo rows, M0–M4 RF/XGB ML models, and the best residual model.
-    """
+    """Keep every evaluated model; sort by RMSE ascending. No filtering."""
     work = metrics_df.copy()
     if "model" not in work.columns:
         raise KeyError("metrics_df requires a model column")
-
-    linear = work[work["model"].map(_is_linear_model)].copy()
-    ml_spec = work[work["model"].map(_is_ml_spec_model)].copy()
-    residual = work[work["model"].map(_is_residual_model)].copy()
-
-    rows = [linear, ml_spec]
-    if not residual.empty:
-        best = residual.sort_values("rmse").iloc[[0]].copy()
-        src = str(best["model"].iloc[0])
-        best["model"] = f"Residual-best({src.replace('Residual-', '')})"
-        rows.append(best)
-
-    out = pd.concat(rows, ignore_index=True)
-    out = out.sort_values("rmse").reset_index(drop=True)
-    return out.drop(columns=["model_key"], errors="ignore")
+    out = work.drop(columns=["model_key"], errors="ignore")
+    return out.sort_values("rmse").reset_index(drop=True)
 
 
 def select_best_ml_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
@@ -757,41 +945,14 @@ def save_model_performance_plot(
 
 def save_top5_plus_residual_learning_plot(
     metrics_df: pd.DataFrame,
-    y_true: np.ndarray,
-    residual_learning_predictions: dict[str, np.ndarray],
     out_dir: Path,
     fold_tag: str | None = None,
+    top_n: int = 5,
 ) -> tuple[Path, Path]:
-    """
-    Top linear/phylo models + best residual ML, evaluated on the current fold's
-    y_true (for test fold this is the held-out 20% test set).
-    """
-    linear = metrics_df[metrics_df["model"].map(_is_linear_model)].copy()
-    top_linear = linear.sort_values("rmse").head(5)
-
-    # Always recompute residual metrics on this fold's y_true (test when fold_tag=test).
-    residual_rows: list[dict] = []
-    if residual_learning_predictions:
-        scored = []
-        for model_name, y_pred in residual_learning_predictions.items():
-            scored.append({"model": model_name, "y_pred": y_pred, **evaluate(y_true, y_pred)})
-        best = min(scored, key=lambda r: r["rmse"] if np.isfinite(r["rmse"]) else np.inf)
-        src = str(best["model"]).replace("Residual-", "")
-        residual_rows.append(
-            {
-                "model": f"Residual-best({src})",
-                "rmse": best["rmse"],
-                "mae": best["mae"],
-                "r2": best["r2"],
-            }
-        )
-
-    parts = [top_linear[["model", "rmse", "mae", "r2"]]]
-    if residual_rows:
-        parts.append(pd.DataFrame(residual_rows))
-    plot_df = pd.concat(parts, ignore_index=True)
-    plot_df = plot_df.drop_duplicates(subset=["model"], keep="first").reset_index(drop=True)
-    plot_df = plot_df.sort_values("rmse").reset_index(drop=True)
+    """Plot the top-N models by RMSE among all evaluated models."""
+    plot_df = select_model_performance_rows(metrics_df).head(top_n).copy()
+    keep_cols = [c for c in ("model", "rmse", "mae", "r2") if c in plot_df.columns]
+    plot_df = plot_df[keep_cols].reset_index(drop=True)
     model_order = plot_df["model"].tolist()
 
     sns.set_theme(style="whitegrid")
@@ -825,11 +986,11 @@ def save_top5_plus_residual_learning_plot(
             label.set_horizontalalignment("right")
 
     if fold_tag == "test":
-        title = "Top models + best ML (held-out test set)"
+        title = f"Top-{top_n} models (held-out test set)"
     elif fold_tag:
-        title = f"Top models + best ML ({fold_tag})"
+        title = f"Top-{top_n} models ({fold_tag})"
     else:
-        title = "Top models + best ML"
+        title = f"Top-{top_n} models"
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
 
@@ -961,9 +1122,10 @@ def main() -> None:
     fold_name_map = {"test": "test"}
     parser = argparse.ArgumentParser(
         description=(
-            "Fit linear/phylo M0-M4 on the held-out test split, merge the latest "
-            "test-only explore_ml and residual-learning predictions, and write "
-            "final test reports."
+            "Fit linear/phylo M0-M4 on the shared species-blocked held-out test "
+            "partition (not a single-split 'CV'), merge explore_ml and "
+            "residual-learning test predictions, and write final test reports "
+            "with micro, macro, and class-balanced weighted metrics."
         )
     )
     parser.add_argument("--split-dir", type=Path, default=Path("data/splits"))
@@ -1016,10 +1178,10 @@ def main() -> None:
             / fold_tag
             / "benchmark_predictions_test.csv"
         )
-        residual_train_pred_path = (
+        residual_cv_pred_path = (
             _resolve_path(root, args.residual_learning_dir)
-            / fold_tag
-            / "benchmark_predictions_train.csv"
+            / "cv"
+            / "benchmark_predictions_cv.csv"
         )
         pgls_fold_out = _resolve_path(root, args.pgls_output_dir) / fold_tag
 
@@ -1077,15 +1239,15 @@ def main() -> None:
                 )
             except (ValueError, KeyError) as exc:
                 print(f"[{fold_tag}] Existing residual test predictions are stale: {exc}")
-        if residual_train_pred_path.exists():
+        if residual_cv_pred_path.exists():
             try:
                 residual_train_predictions = load_residual_learning_predictions(
-                    residual_train_pred_path,
+                    residual_cv_pred_path,
                     train_df,
-                    "train",
+                    "cv",
                 )
             except (ValueError, KeyError) as exc:
-                print(f"[{fold_tag}] Existing residual train predictions are stale: {exc}")
+                print(f"[{fold_tag}] Existing residual CV predictions are stale: {exc}")
         if residual_learning_predictions is None or residual_train_predictions is None:
             residual_group_dir = _resolve_path(root, args.residual_learning_dir)
             residual_output_dir = (
@@ -1110,14 +1272,14 @@ def main() -> None:
                 "test",
             )
             residual_train_predictions = load_residual_learning_predictions(
-                residual_train_pred_path,
+                residual_cv_pred_path,
                 train_df,
-                "train",
+                "cv",
             )
         print(
             f"[{fold_tag}] Loaded residual predictions: "
             f"test={list(residual_learning_predictions)}, "
-            f"train={list(residual_train_predictions)}"
+            f"cv={list(residual_train_predictions)}"
         )
 
         pgls_predictions = run_pgls_with_ape(
@@ -1170,15 +1332,11 @@ def main() -> None:
         train_metrics_path = fold_out / "explore_metrics_train.csv"
         train_metrics_out = train_metrics_df.drop(columns=["model_key"], errors="ignore")
         train_metrics_out.to_csv(train_metrics_path, index=False, encoding="utf-8")
+        protocol_path = write_evaluation_protocol_note(fold_out)
 
         plot_path = save_model_performance_plot(metrics_out, fold_out, fold_tag=fold_tag)
-        residual_short = {
-            to_short_model_name(k): v for k, v in residual_learning_predictions.items()
-        }
         top5_residual_plot_path, top5_residual_metrics_path = save_top5_plus_residual_learning_plot(
             metrics_out,
-            y_true,
-            residual_short,
             fold_out,
             fold_tag=fold_tag,
         )
@@ -1194,9 +1352,28 @@ def main() -> None:
         print(f"[{fold_tag}] Saved train linear metrics: {train_linear_path}")
         print(f"[{fold_tag}] Saved all metrics: {metrics_path}")
         print(f"[{fold_tag}] Saved train metrics: {train_metrics_path}")
+        print(f"[{fold_tag}] Saved evaluation protocol: {protocol_path}")
+        print(f"[{fold_tag}] Class-balanced weight formula: {CLASS_BALANCED_WEIGHT_FORMULA}")
+        weighted = metrics_out.loc[metrics_out["train_class_weighted"] == 1]
+        if not weighted.empty:
+            cols = [
+                c
+                for c in (
+                    "model",
+                    "rmse",
+                    "rmse_macro",
+                    "rmse_bal",
+                    "mae",
+                    "mae_macro",
+                    "mae_bal",
+                )
+                if c in weighted.columns
+            ]
+            print(f"\n[{fold_tag}] CLASS-WEIGHTED MODELS (micro / macro / bal):")
+            print(weighted[cols].to_string(index=False))
         print(f"[{fold_tag}] Saved plot: {plot_path}")
-        print(f"[{fold_tag}] Saved top-5 + residual plot: {top5_residual_plot_path}")
-        print(f"[{fold_tag}] Saved top-5 + residual metrics: {top5_residual_metrics_path}")
+        print(f"[{fold_tag}] Saved top-5 plot: {top5_residual_plot_path}")
+        print(f"[{fold_tag}] Saved top-5 metrics: {top5_residual_metrics_path}")
         print(f"[{fold_tag}] Saved residual plot: {residual_plot_path}")
 
     if fold_tags:

@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Generate a compact data-flow table for §5.1 with three stages only:
-
-1. After merging the three sources and dropping incomplete / duplicate rows
-2. After class whitelist + dropping classes with <7 species
-3. After phylogeny embedding join + dropping classes with <7 species again
-
-Outputs: results/data_compilation/data_flow_table.csv
-Columns: stage, unique_species, classes
-"""
 
 from __future__ import annotations
 

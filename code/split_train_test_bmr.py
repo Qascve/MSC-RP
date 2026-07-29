@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-Create a fixed species-block 4-fold development split plus held-out test.
+Create a fixed species-blocked 4-fold development partition plus held-out test.
 
-Per class, each species (taxon_name) is assigned wholly to one of:
-  F1, F2, F3, F4, T (each ~20%).
+This is a species-blocked holdout design (plus reusable development folds), not
+a claim that the single 20% test bucket alone is "cross-validation".
 
-Fold design (no species leakage):
-  Fold i: train = the other three development folds (60%), eval = Fi (20%)
-  Test:   train = F1 ∪ F2 ∪ F3 ∪ F4 (80%), eval = T (20%)
+Per taxonomic class, each species (taxon_name) is assigned wholly to one of:
+  F1, F2, F3, F4, T (target ~20% each).
 
-Also writes class weights: class_rows / total_rows.
+Stratification details:
+  - Within each class, species are shuffled (seeded) then placed into buckets
+    with per-class quotas from _allocate_counts.
+  - Remainder slots prefer currently lightest buckets (by global row totals).
+  - Classes with n_species < 5 cannot appear in every bucket; some folds/test
+    may lack that class. With n_species >= 5, all five buckets receive >=1 species.
+
+Fold usage:
+  Fold i (HP/CV): train = other three development folds (~60%), eval = Fi (~20%)
+  Test holdout:   train = F1∪F2∪F3∪F4 (~80%), eval = T (~20%)
+
+Also writes class_weights.csv with row shares. Training sample weights used by
+residual RF/XGB and explore M3-L/M4-L follow sklearn balanced:
+  w_c = n / (n_classes * n_c).
 """
 
 from __future__ import annotations
