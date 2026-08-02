@@ -22,15 +22,18 @@ K_BOLTZMANN_EV_PER_K = 8.617e-5
 M0_SLOPE = 0.75
 REFERENCE_SLOPE = M0_SLOPE
 CI_Z = 1.96
-M1_LABEL = "estimate exponent"
-M2_LABEL = "M2 MTE"
-M2_CMP_LABEL = "M2"
-M3_CMP_LABEL = "M3"
-M4_CMP_LABEL = "M4"
-M3_L_LABEL = "M3 (MTE + class)"
-M3_XGB_LABEL = "M3-XGB"
-M4_XGB_LABEL = "M4-XGB"
+M0_L_LABEL = "Fixed b"
+M1_L_LABEL = "Free b"
+M2_L_LABEL = "MTE"
+M3_L_LABEL = "MTE+class"
+M4_L_LABEL = "MTE+phylogeny"
+M3_L_SHORT_LABEL = "MTE"
+M3_XGB_LABEL = "XGB-MTE"
+M4_XGB_LABEL = "XGB-MTE+Class"
+M3_RF_LABEL = "RF-MTE"
+M4_RF_LABEL = "RF-MTE+Class"
 RESIDUAL_XGB_LABEL = "Residual-XGB"
+RESIDUAL_RF_LABEL = "Residual-RF"
 PHYLO_PC_COLS = ["pc1", "pc2", "pc3", "pc4", "pc5"]
 
 
@@ -190,7 +193,7 @@ def evaluate_log_predictions(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> 
 
 
 def fit_m1_m2_on_train(train_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Fit M1-L and M2-L on train; return coefficients for each model."""
+    #Fit M1-L and M2-L on train; return coefficients for each model.
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
     X1 = np.column_stack([np.ones(len(train_df)), train_df["log_mass"].to_numpy()])
     X2 = np.column_stack(
@@ -217,48 +220,39 @@ def predict_m1_m2(
     return predict_ols(X1, coef_m1), predict_ols(X2, coef_m2)
 
 
-def build_m1_m2_metrics(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
-    coef_m1, coef_m2 = fit_m1_m2_on_train(train_df)
-    y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
-    pred_m1, pred_m2 = predict_m1_m2(test_df, coef_m1, coef_m2)
-    rows = [
-        {"model": M1_LABEL, **evaluate_log_predictions(y_test, pred_m1)},
-        {"model": M2_LABEL, **evaluate_log_predictions(y_test, pred_m2)},
-    ]
-    return pd.DataFrame(rows)
+def predict_m0_fixed_b(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
+    #M0: log_BMR ~ intercept + 0.75 * log_mass (slope fixed).
+    y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
+    alpha = float(np.mean(y_train - M0_SLOPE * train_df["log_mass"].to_numpy(dtype=float)))
+    return alpha + M0_SLOPE * test_df["log_mass"].to_numpy(dtype=float)
 
 
-def build_m2_m3_m4_metrics(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
+def build_m1_m4_linear_metrics(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
+    # M0–M4 prespecified models on the held-out test set.
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
     y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
-
-    X2_train = np.column_stack(
-        [np.ones(len(train_df)), train_df["log_mass"].to_numpy(), train_df["inv_kT"].to_numpy()]
-    )
-    X2_test = np.column_stack(
-        [np.ones(len(test_df)), test_df["log_mass"].to_numpy(), test_df["inv_kT"].to_numpy()]
-    )
-    pred_m2 = predict_ols(X2_test, fit_ols(X2_train, y_train))
+    pred_m0 = predict_m0_fixed_b(train_df, test_df)
+    coef_m1, coef_m2 = fit_m1_m2_on_train(train_df)
+    pred_m1, pred_m2 = predict_m1_m2(test_df, coef_m1, coef_m2)
     pred_m3 = predict_m3_linear(train_df, test_df)
-
-    X4_train = build_design_m4(train_df)
-    X4_test = build_design_m4(test_df)
-    pred_m4 = predict_ols(X4_test, fit_ols(X4_train, y_train))
-
+    pred_m4 = predict_ols(build_design_m4(test_df), fit_ols(build_design_m4(train_df), y_train))
     rows = [
-        {"model": M2_CMP_LABEL, **evaluate_log_predictions(y_test, pred_m2)},
-        {"model": M3_CMP_LABEL, **evaluate_log_predictions(y_test, pred_m3)},
-        {"model": M4_CMP_LABEL, **evaluate_log_predictions(y_test, pred_m4)},
+        {"model": M0_L_LABEL, **evaluate_log_predictions(y_test, pred_m0)},
+        {"model": M1_L_LABEL, **evaluate_log_predictions(y_test, pred_m1)},
+        {"model": M2_L_LABEL, **evaluate_log_predictions(y_test, pred_m2)},
+        {"model": M3_L_LABEL, **evaluate_log_predictions(y_test, pred_m3)},
+        {"model": M4_L_LABEL, **evaluate_log_predictions(y_test, pred_m4)},
     ]
     return pd.DataFrame(rows)
 
 
-def build_m3_ml_residual_metrics(
+def build_ml_residual_metrics(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     explore_ml_predictions_path: Path,
     residual_predictions_path: Path,
 ) -> pd.DataFrame:
+    """Prespecified MTE + M3/M4 RF/XGB + Residual-RF/XGB on the held-out test set."""
     y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
     pred_m3 = predict_m3_linear(train_df, test_df)
     pred_m3_xgb = load_prediction_column(
@@ -267,14 +261,26 @@ def build_m3_ml_residual_metrics(
     pred_m4_xgb = load_prediction_column(
         explore_ml_predictions_path, "xgboost_m4", y_test, split_label="test"
     )
+    pred_m3_rf = load_prediction_column(
+        explore_ml_predictions_path, "random_forest_m3", y_test, split_label="test"
+    )
+    pred_m4_rf = load_prediction_column(
+        explore_ml_predictions_path, "random_forest_m4", y_test, split_label="test"
+    )
     pred_residual_xgb = load_prediction_column(
         residual_predictions_path, "xgboost", y_test, split_label="test"
     )
+    pred_residual_rf = load_prediction_column(
+        residual_predictions_path, "random_forest", y_test, split_label="test"
+    )
 
     rows = [
-        {"model": M3_L_LABEL, **evaluate_log_predictions(y_test, pred_m3)},
+        {"model": M3_L_SHORT_LABEL, **evaluate_log_predictions(y_test, pred_m3)},
+        {"model": M3_RF_LABEL, **evaluate_log_predictions(y_test, pred_m3_rf)},
+        {"model": M4_RF_LABEL, **evaluate_log_predictions(y_test, pred_m4_rf)},
         {"model": M3_XGB_LABEL, **evaluate_log_predictions(y_test, pred_m3_xgb)},
         {"model": M4_XGB_LABEL, **evaluate_log_predictions(y_test, pred_m4_xgb)},
+        {"model": RESIDUAL_RF_LABEL, **evaluate_log_predictions(y_test, pred_residual_rf)},
         {"model": RESIDUAL_XGB_LABEL, **evaluate_log_predictions(y_test, pred_residual_xgb)},
     ]
     return pd.DataFrame(rows)
@@ -318,37 +324,26 @@ def save_rmse_r2_comparison_plot(metrics_df: pd.DataFrame, output_path: Path, ti
     plt.close(fig)
 
 
-def save_m1_m2_comparison_plot(metrics_df: pd.DataFrame, output_path: Path) -> None:
+def save_m1_m4_linear_comparison_plot(metrics_df: pd.DataFrame, output_path: Path) -> None:
     save_rmse_r2_comparison_plot(
         metrics_df,
         output_path,
-        title=f"{M1_LABEL} vs {M2_LABEL} on test set",
+        title="M1-M4 Prespecified models on test set",
     )
 
 
-def save_m2_m3_m4_comparison_plot(metrics_df: pd.DataFrame, output_path: Path) -> None:
+def save_ml_residual_comparison_plot(metrics_df: pd.DataFrame, output_path: Path) -> None:
     save_rmse_r2_comparison_plot(
         metrics_df,
         output_path,
-        title=f"{M2_CMP_LABEL} vs {M3_CMP_LABEL} vs {M4_CMP_LABEL} on test set",
-    )
-
-
-def save_m3_ml_residual_comparison_plot(metrics_df: pd.DataFrame, output_path: Path) -> None:
-    save_rmse_r2_comparison_plot(
-        metrics_df,
-        output_path,
-        title=(
-            f"{M3_L_LABEL} vs {M3_XGB_LABEL} vs {M4_XGB_LABEL} vs "
-            f"{RESIDUAL_XGB_LABEL} on test set"
-        ),
+        title="Machine Learning models VS Prespecified models",
     )
 
 
 def fit_mass_slope(
     log_mass: np.ndarray, log_bmr: np.ndarray
 ) -> tuple[float, float, float, int]:
-    """OLS: log10(BMR) ~ intercept + b * log10(mass). Returns b, SE, intercept, n."""
+    #OLS: log10(BMR) ~ intercept + b * log10(mass). Returns b, SE, intercept, n.
     x = np.asarray(log_mass, dtype=float)
     y = np.asarray(log_bmr, dtype=float)
     mask = np.isfinite(x) & np.isfinite(y)
@@ -493,13 +488,13 @@ def main() -> None:
         "--train",
         type=Path,
         default=Path("data/splits/train.csv"),
-        help="Training CSV used to estimate slopes and fit M1-L/M2-L.",
+        help="Training CSV used to estimate slopes and fit linear models.",
     )
     parser.add_argument(
         "--test",
         type=Path,
         default=Path("data/splits/test/test.csv"),
-        help="Held-out test CSV for M1-L vs M2-L comparison (default: data/splits/test/test.csv).",
+        help="Held-out test CSV for model comparisons (default: data/splits/test/test.csv).",
     )
     parser.add_argument(
         "--output",
@@ -520,28 +515,16 @@ def main() -> None:
         help="Minimum rows per class required to estimate b (default: 10).",
     )
     parser.add_argument(
-        "--m1-m2-output",
+        "--m1-m4-linear-output",
         type=Path,
-        default=Path("results/plots/m1_m2_linear_comparison.png"),
-        help="Output PNG for M1-L vs M2-L RMSE/R2 comparison on test set.",
+        default=Path("results/plots/m1_m4_linear_comparison.png"),
+        help="Output PNG for M1–M4 linear RMSE/R2 comparison on test set.",
     )
     parser.add_argument(
-        "--m1-m2-metrics-output",
+        "--m1-m4-linear-metrics-output",
         type=Path,
-        default=Path("results/plots/m1_m2_linear_comparison.csv"),
-        help="Output CSV for M1-L vs M2-L test metrics.",
-    )
-    parser.add_argument(
-        "--m2-m3-m4-output",
-        type=Path,
-        default=Path("results/plots/m2_m3_m4_linear_comparison.png"),
-        help="Output PNG for M2-L vs M3-L vs M4-L RMSE/R2 comparison on test set.",
-    )
-    parser.add_argument(
-        "--m2-m3-m4-metrics-output",
-        type=Path,
-        default=Path("results/plots/m2_m3_m4_linear_comparison.csv"),
-        help="Output CSV for M2-L vs M3-L vs M4-L test metrics.",
+        default=Path("results/plots/m1_m4_linear_comparison.csv"),
+        help="Output CSV for M1–M4 linear test metrics.",
     )
     parser.add_argument(
         "--explore-ml-predictions",
@@ -553,19 +536,19 @@ def main() -> None:
         "--residual-predictions",
         type=Path,
         default=Path("results/benchmark/all/test/benchmark_predictions_test.csv"),
-        help="Test predictions CSV from ml_residual_learning.py (Residual-XGB).",
+        help="Test predictions CSV from ml_residual_learning.py (Residual-RF/XGB).",
     )
     parser.add_argument(
-        "--m3-ml-residual-output",
+        "--ml-residual-output",
         type=Path,
-        default=Path("results/plots/m3_ml_residual_comparison.png"),
-        help="Output PNG for M3-L / M3-XGB / M4-XGB / Residual-XGB comparison.",
+        default=Path("results/plots/ml_residual_comparison.png"),
+        help="Output PNG for M3-L / M3-XGB / M4-XGB / Residual-RF / Residual-XGB.",
     )
     parser.add_argument(
-        "--m3-ml-residual-metrics-output",
+        "--ml-residual-metrics-output",
         type=Path,
-        default=Path("results/plots/m3_ml_residual_comparison.csv"),
-        help="Output CSV for M3-L / M3-XGB / M4-XGB / Residual-XGB test metrics.",
+        default=Path("results/plots/ml_residual_comparison.csv"),
+        help="Output CSV for M3-L / M3-XGB / M4-XGB / Residual-RF / Residual-XGB.",
     )
     args = parser.parse_args()
 
@@ -573,16 +556,14 @@ def main() -> None:
     test_path = resolve_path(root, args.test)
     output_path = resolve_path(root, args.output)
     summary_output_path = resolve_path(root, args.summary_output)
-    m1_m2_output_path = resolve_path(root, args.m1_m2_output)
-    m1_m2_metrics_output_path = resolve_path(root, args.m1_m2_metrics_output)
-    m2_m3_m4_output_path = resolve_path(root, args.m2_m3_m4_output)
-    m2_m3_m4_metrics_output_path = resolve_path(root, args.m2_m3_m4_metrics_output)
+    m1_m4_linear_output_path = resolve_path(root, args.m1_m4_linear_output)
+    m1_m4_linear_metrics_output_path = resolve_path(root, args.m1_m4_linear_metrics_output)
     explore_ml_predictions_path = resolve_path(root, args.explore_ml_predictions)
     residual_predictions_path = resolve_path(root, args.residual_predictions)
-    m3_ml_residual_output_path = resolve_path(root, args.m3_ml_residual_output)
-    m3_ml_residual_metrics_output_path = resolve_path(root, args.m3_ml_residual_metrics_output)
+    ml_residual_output_path = resolve_path(root, args.ml_residual_output)
+    ml_residual_metrics_output_path = resolve_path(root, args.ml_residual_metrics_output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    m1_m2_output_path.parent.mkdir(parents=True, exist_ok=True)
+    m1_m4_linear_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     train_df = prepare_frame(pd.read_csv(train_path))
     test_df = prepare_frame(pd.read_csv(test_path))
@@ -597,37 +578,42 @@ def main() -> None:
     save_slope_plot(summary, output_path)
     write_summary_table(summary, summary_output_path)
 
-    m1_m2_metrics = build_m1_m2_metrics(train_model_df, test_model_df)
-    save_m1_m2_comparison_plot(m1_m2_metrics, m1_m2_output_path)
-    m1_m2_metrics.to_csv(m1_m2_metrics_output_path, index=False, encoding="utf-8")
+    m1_m4_linear_metrics = build_m1_m4_linear_metrics(train_model_df, test_model_df)
+    save_m1_m4_linear_comparison_plot(m1_m4_linear_metrics, m1_m4_linear_output_path)
+    m1_m4_linear_metrics.to_csv(m1_m4_linear_metrics_output_path, index=False, encoding="utf-8")
 
-    m2_m3_m4_metrics = build_m2_m3_m4_metrics(train_model_df, test_model_df)
-    save_m2_m3_m4_comparison_plot(m2_m3_m4_metrics, m2_m3_m4_output_path)
-    m2_m3_m4_metrics.to_csv(m2_m3_m4_metrics_output_path, index=False, encoding="utf-8")
-
-    m3_ml_residual_metrics = build_m3_ml_residual_metrics(
+    ml_residual_metrics = build_ml_residual_metrics(
         train_model_df,
         test_model_df,
         explore_ml_predictions_path,
         residual_predictions_path,
     )
-    save_m3_ml_residual_comparison_plot(m3_ml_residual_metrics, m3_ml_residual_output_path)
-    m3_ml_residual_metrics.to_csv(m3_ml_residual_metrics_output_path, index=False, encoding="utf-8")
+    save_ml_residual_comparison_plot(ml_residual_metrics, ml_residual_output_path)
+    ml_residual_metrics.to_csv(ml_residual_metrics_output_path, index=False, encoding="utf-8")
+
+    # Remove superseded comparison artifacts.
+    for stale in (
+        output_path.parent / "m1_m2_linear_comparison.png",
+        output_path.parent / "m1_m2_linear_comparison.csv",
+        output_path.parent / "m2_m3_m4_linear_comparison.png",
+        output_path.parent / "m2_m3_m4_linear_comparison.csv",
+        output_path.parent / "m3_ml_residual_comparison.png",
+        output_path.parent / "m3_ml_residual_comparison.csv",
+    ):
+        if stale.exists():
+            stale.unlink()
 
     global_b = float(summary.attrs["global_b"])
     print(f"Global b = {global_b:.4f} (reference b = {REFERENCE_SLOPE:.2f})")
     print(f"Plotted classes: {len(summary)}")
     print(f"Saved plot: {output_path}")
     print(f"Saved summary: {summary_output_path}")
-    print(f"Saved M1/M2 comparison plot: {m1_m2_output_path}")
-    print(f"Saved M1/M2 comparison metrics: {m1_m2_metrics_output_path}")
-    print(m1_m2_metrics.to_string(index=False))
-    print(f"Saved M2/M3/M4 comparison plot: {m2_m3_m4_output_path}")
-    print(f"Saved M2/M3/M4 comparison metrics: {m2_m3_m4_metrics_output_path}")
-    print(m2_m3_m4_metrics.to_string(index=False))
-    print(f"Saved M3/ML/residual comparison plot: {m3_ml_residual_output_path}")
-    print(f"Saved M3/ML/residual comparison metrics: {m3_ml_residual_metrics_output_path}")
-    print(m3_ml_residual_metrics.to_string(index=False))
+    print(f"Saved M1–M4 linear comparison plot: {m1_m4_linear_output_path}")
+    print(f"Saved M1–M4 linear comparison metrics: {m1_m4_linear_metrics_output_path}")
+    print(m1_m4_linear_metrics.to_string(index=False))
+    print(f"Saved ML/residual comparison plot: {ml_residual_output_path}")
+    print(f"Saved ML/residual comparison metrics: {ml_residual_metrics_output_path}")
+    print(ml_residual_metrics.to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,3 @@
-fold,model,max_depth,min_samples_leaf,max_features,trial,f_1_val_rmse,f_1_n_estimators,f_2_val_rmse,f_2_n_estimators,f_3_val_rmse,f_3_n_estimators,f_4_val_rmse,f_4_n_estimators,cv_mean_rmse,cv_std_rmse,n_estimators,is_best,learning_rate,subsample,colsample_bytree,reg_lambda,min_child_weight
-cv4,random_forest,8.0,5.0,1.0,2.0,0.37403109127654754,100.0,0.2909480556674864,200.0,0.27442657848790253,50.0,0.30098901814758944,50.0,0.3100986858948815,0.038110314841631784,100.0,1,,,,,
-cv4,xgboost,8.0,,,661.0,0.33460021999291334,179.0,0.46786855823939066,264.0,0.30044542813422265,152.0,0.33964535720228883,197.0,0.3606398908922039,0.06371851252417927,198.0,1,0.02,0.3,0.3,0.8,4.0
+fold,model,max_depth,min_samples_leaf,max_features,trial,f_1_val_rmse,f_1_n_estimators,f_2_val_rmse,f_2_n_estimators,f_3_val_rmse,f_3_n_estimators,f_4_val_rmse,f_4_n_estimators,cv_mean_rmse,cv_std_rmse,n_estimators,is_best,learning_rate
+cv4,random_forest,8.0,5.0,1.0,2.0,0.37403109127654754,100.0,0.2909480556674864,200.0,0.27442657848790253,50.0,0.3004453545871587,150.0,0.3099627700047738,0.03814351601408512,125.0,1,
+cv4,xgboost,6.0,,,5.0,0.3361161882199682,147.0,0.4794559661201207,554.0,0.33524945708182496,7.0,0.3522067524448787,65.0,0.3757570909666981,0.06025019652686628,193.0,1,0.03

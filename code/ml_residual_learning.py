@@ -56,7 +56,12 @@ GROUP_CLASS_FILTERS: dict[str, str | None] = {
     "all": None,
     "Teleostei": "Teleostei",
     "Mammalia": "Mammalia",
+    "Aves": "Aves",
     "Insecta": "Insecta",
+    "Malacostraca": "Malacostraca",
+    "Amphibia": "Amphibia",
+    "Reptilia": "Reptilia",
+    "Cephalopoda": "Cephalopoda",
 }
 FOLD_DIR_NAMES = {
     "fold1": "f_1",
@@ -76,11 +81,11 @@ TREE_MODEL_FEATURES = [
     "pc5",
 ]
 
-EARLY_STOPPING_ROUNDS = 30
+EARLY_STOPPING_ROUNDS = 100
 XGB_MAX_ESTIMATORS = 1000
 RF_TREE_BATCH = 50
 RF_MAX_ESTIMATORS = 1000
-N_HP_TRIALS = 2000
+N_HP_TRIALS = 9
 RF_PARAM_GRID = {
     "max_depth": [4, 6, 8],
 }
@@ -88,13 +93,10 @@ RF_FIXED_PARAMS = {
     "min_samples_leaf": 5,
     "max_features": 1.0,
 }
+# Only these keys are searched; all other XGB hyperparameters use library defaults.
 XGB_PARAM_GRID = {
     "max_depth": [4, 6, 8],
-    "learning_rate": [0.01,0.02,0.03],
-    "subsample": [0.3, 0.6, 0.7],
-    "colsample_bytree": [0.3, 0.6, 0.7],
-    "reg_lambda": [0.3,0.5,0.6,0.7,0.8,0.9 ],
-    "min_child_weight": [2, 3, 4, 5,6,],
+    "learning_rate": [0.01, 0.02, 0.03],
 }
 
 
@@ -269,15 +271,42 @@ def draw_unique_param_sets(grid: dict, n_trials: int, random_state: int) -> list
     """Randomly draw unique parameter combinations without replacement."""
     all_combinations = _cartesian_param_dicts(grid)
     total = len(all_combinations)
+    if total == 0:
+        raise ValueError("Parameter grid produced no combinations.")
     if len({_params_key(params) for params in all_combinations}) != total:
         raise ValueError("XGB_PARAM_GRID contains duplicate parameter combinations.")
-    if not 1 <= n_trials <= total:
-        raise ValueError(
-            f"n_hp_trials must be between 1 and {total}; got {n_trials}."
-        )
+    if n_trials < 1:
+        raise ValueError(f"n_hp_trials must be >= 1; got {n_trials}.")
+    # Small grids (e.g. only max_depth × learning_rate) may have fewer combos than N_HP_TRIALS.
+    n_draw = min(int(n_trials), total)
+    if n_draw == total:
+        return list(all_combinations)
     rng = np.random.default_rng(random_state)
-    selected = rng.choice(total, size=n_trials, replace=False)
+    selected = rng.choice(total, size=n_draw, replace=False)
     return [all_combinations[int(i)] for i in selected]
+
+
+def make_xgb_regressor(
+    *,
+    n_estimators: int,
+    learning_rate: float,
+    max_depth: int,
+    random_state: int,
+    early_stopping_rounds: int | None = None,
+) -> XGBRegressor:
+    """Build XGBRegressor using searched HPs only; remaining args stay at XGBoost defaults."""
+    kwargs: dict = {
+        "objective": "reg:squarederror",
+        "n_estimators": int(n_estimators),
+        "learning_rate": float(learning_rate),
+        "max_depth": int(max_depth),
+        "random_state": int(random_state),
+        "n_jobs": -1,
+        "eval_metric": "rmse",
+    }
+    if early_stopping_rounds is not None:
+        kwargs["early_stopping_rounds"] = int(early_stopping_rounds)
+    return XGBRegressor(**kwargs)
 
 
 def encode_train_frame(
@@ -358,18 +387,11 @@ def fit_xgb_with_early_stopping(
     sample_weight_val: np.ndarray | None,
     random_state: int,
 ) -> tuple[XGBRegressor, int, float, list[float]]:
-    xgb = XGBRegressor(
-        objective="reg:squarederror",
+    xgb = make_xgb_regressor(
         n_estimators=XGB_MAX_ESTIMATORS,
         learning_rate=params["learning_rate"],
         max_depth=params["max_depth"],
-        subsample=params["subsample"],
-        colsample_bytree=params["colsample_bytree"],
-        reg_lambda=params["reg_lambda"],
-        min_child_weight=params["min_child_weight"],
         random_state=random_state,
-        n_jobs=-1,
-        eval_metric="rmse",
         early_stopping_rounds=EARLY_STOPPING_ROUNDS,
     )
     fit_kwargs: dict = {
@@ -575,18 +597,11 @@ def tune_models_on_train(
     )
     rf_full.fit(X_all, residual_all, sample_weight=sw_all)
 
-    xgb_full = XGBRegressor(
-        objective="reg:squarederror",
+    xgb_full = make_xgb_regressor(
         n_estimators=xgb_n_final,
         learning_rate=best_xgb["learning_rate"],
         max_depth=best_xgb["max_depth"],
-        subsample=best_xgb["subsample"],
-        colsample_bytree=best_xgb["colsample_bytree"],
-        reg_lambda=best_xgb["reg_lambda"],
-        min_child_weight=best_xgb["min_child_weight"],
         random_state=random_state,
-        n_jobs=-1,
-        eval_metric="rmse",
     )
     xgb_full.fit(X_all, residual_all, sample_weight=sw_all, verbose=False)
 
@@ -624,10 +639,6 @@ def tune_models_on_train(
                 "trial": int(best_xgb["trial"]),
                 "max_depth": int(best_xgb["max_depth"]),
                 "learning_rate": float(best_xgb["learning_rate"]),
-                "subsample": float(best_xgb["subsample"]),
-                "colsample_bytree": float(best_xgb["colsample_bytree"]),
-                "reg_lambda": float(best_xgb["reg_lambda"]),
-                "min_child_weight": int(best_xgb["min_child_weight"]),
                 "n_estimators": xgb_n_final,
                 "cv_mean_rmse": float(best_xgb["cv_mean_rmse"]),
                 "cv_std_rmse": float(best_xgb["cv_std_rmse"]),
@@ -1487,7 +1498,18 @@ def write_group_eval_from_predictions(
         class_labels=pred_df["class"] if "class" in pred_df.columns else None,
     )
 
-    print(f"\n[{group_name}] Eval rows: {len(pred_df)} (RF + XGB)")
+    n_obs = len(pred_df)
+    n_species = (
+        int(pred_df["taxon_name"].nunique()) if "taxon_name" in pred_df.columns else None
+    )
+    print(f"\n[{group_name}] Eval rows: {n_obs} (RF + XGB)")
+    if n_species is None:
+        print(f"[{group_name}] Test data for this group: {n_obs} observations")
+    else:
+        print(
+            f"[{group_name}] Test data for this group: {n_obs} observations, "
+            f"{n_species} species"
+        )
     print(f"[{group_name}] Saved outputs in: {out_dir}")
     print(metrics_df.to_string(index=False))
     return metrics_df
@@ -1524,18 +1546,11 @@ def fit_fixed_xgb(
     random_state: int,
 ) -> XGBRegressor:
     """Fit XGB with a fixed hyperparameter set (no early stopping)."""
-    xgb = XGBRegressor(
-        objective="reg:squarederror",
+    xgb = make_xgb_regressor(
         n_estimators=int(params["n_estimators"]),
         learning_rate=float(params["learning_rate"]),
         max_depth=int(params["max_depth"]),
-        subsample=float(params["subsample"]),
-        colsample_bytree=float(params["colsample_bytree"]),
-        reg_lambda=float(params["reg_lambda"]),
-        min_child_weight=int(params["min_child_weight"]),
         random_state=random_state,
-        n_jobs=-1,
-        eval_metric="rmse",
     )
     fit_kwargs: dict = {"verbose": False}
     if sample_weight is not None:
