@@ -2,13 +2,19 @@
 
 ## 1. Project Goal
 
-This repository builds a reproducible workflow for the basal metabolic rate (BMR) analysis. It merges raw BMR, body mass, temperature, taxonomy, and phylogeny data; creates stratified train/test splits; and compares physics-inspired MTE models, tree-based residual-learning models, and a phylogenetic mixed model.
+This repository builds a reproducible workflow for basal metabolic rate (BMR) analysis. It merges raw BMR, body mass, temperature, taxonomy, and phylogeny data; creates a species-blocked development/test partition; and compares physics-inspired MTE models, tree-based residual-learning models, and phylogenetic PGLS.
 
-Current processed split:
-- Total rows after cleaning and phylogeny merge: 5,672
-- Train rows: 3,970
-- Test rows: 1,702
-- Largest classes in the test split: `Teleostei` 1,190, `Mammalia` 140, `Insecta` 78
+All modeling targets use `log_BMR = log10(BMR)`.
+
+Current processed dataset (`data/merge_phylo.csv`):
+- Observations: 5,077
+- Species: 1,594
+- Classes: 8 (`Teleostei`, `Mammalia`, `Aves`, `Insecta`, `Malacostraca`, `Amphibia`, `Reptilia`, `Cephalopoda`)
+
+Current species-blocked split (`data/splits/`):
+- Development (F1∪F2∪F3∪F4): 4,063 rows / 1,277 species
+- Holdout test (T): 1,014 rows / 317 species
+- Largest classes in the holdout test: `Teleostei` 554, `Mammalia` 284, `Aves` 72
 
 ## 2. Environment Setup
 
@@ -18,10 +24,10 @@ Install Python dependencies from the project root:
 pip install -r requirements.txt
 ```
 
-The PGLMM/PGLS steps are run in R and additionally require:
+The PGLS step is run in R and additionally requires:
 
 ```r
-install.packages(c("ape", "nlme", "phytools", "phyr"))
+install.packages(c("ape", "nlme", "phytools"))
 ```
 
 Notes:
@@ -117,7 +123,7 @@ python code/merge_phylo_embedding.py
 
 This joins cleaned observations with `pc1`-`pc5` by `taxon_name`.
 
-### Step 6: Create Stratified Train/Test Split
+### Step 6: Create Species-Blocked Folds and Holdout
 
 Script: `code/split_train_test_bmr.py`
 
@@ -125,15 +131,21 @@ Input:
 - `data/merge_phylo.csv`
 
 Outputs:
-- `data/splits/stratified/train.csv`
-- `data/splits/stratified/test.csv`
-- `data/splits/stratified/class_split_summary.csv`
+- `data/splits/fold1/` … `data/splits/fold4/` (`train.csv`, `test.csv`)
+- `data/splits/test/` (`train.csv` = F1∪F2∪F3∪F4, `test.csv` = holdout T)
+- `data/splits/train.csv` (alias of the 80% development set)
+- `data/splits/class_species_block_split_summary.csv`
+- `data/splits/class_weights.csv`
 
 ```bash
 python code/split_train_test_bmr.py
 ```
 
-This step applies final row filters, derives `log_mass`, `log_BMR`, and `inv_kT`, then creates a class-stratified split.
+Per taxonomic class, each species (`taxon_name`) is assigned wholly to one of F1–F4 or T (~20% each). Fold usage:
+- Fold `i` (HP/CV): train = other three development folds (~60%), eval = Fi (~20%)
+- Test holdout: train = F1∪F2∪F3∪F4 (~80%), eval = T (~20%)
+
+This step also derives `log_mass`, `log_BMR` (`log10`), and `inv_kT`.
 
 ## 4. Model and Result Pipeline
 
@@ -142,7 +154,7 @@ This step applies final row filters, derives `log_mass`, `log_BMR`, and `inv_kT`
 Script: `code/ml_residual_learning.py`
 
 Input:
-- `data/merge_phylo.csv`
+- `data/splits/` (fixed fold1–fold4 + test)
 
 Output directory:
 - `results/benchmark/`
@@ -151,75 +163,75 @@ Output directory:
 python code/ml_residual_learning.py
 ```
 
-The benchmark fits residual Random Forest and XGBoost models on top of a fixed three-quarter power-law baseline. Following Roberts et al. for structured data, it now creates a class-level species-block validation split: within each class, complete species are assigned either to train or test, so the same `taxon_name` cannot appear in both. Training uses class-balanced sample weights to reduce domination by large classes.
+The benchmark fits residual Random Forest and XGBoost on top of a fixed M3-L baseline (`log_BMR ~ log_mass + inv_kT + class`). Hyperparameters are tuned with 4-fold species-block CV on the development set, then models are refit on the full 80% development set and evaluated once on the holdout test. Training uses class-balanced sample weights.
 
-It trains on the all-class species-block training set and reports the full test set plus selected class subsets:
-- `all`: all classes in the species-block test set
-- `Teleostei`
-- `Mammalia`
-- `Insecta`
+It reports the full test set plus per-class subsets:
+- `all`
+- `Teleostei`, `Mammalia`, `Aves`, `Insecta`, `Malacostraca`, `Amphibia`, `Reptilia`, `Cephalopoda`
 
-Key outputs:
-- `data/splits/train.csv`
-- `data/splits/test.csv`
-- `data/splits/class_species_block_split_summary.csv`
-- `results/benchmark/*/benchmark_metrics.csv`
-- `results/benchmark/*/shap_feature_importance.csv`
-- `results/benchmark/*/shap_summary_bar.png`
-- `results/benchmark/*/shap_summary_beeswarm.png`
-- `results/benchmark/benchmark_summary_groups.csv`
+Key outputs (per group):
+- `results/benchmark/<group>/cv/` — OOF CV metrics and predictions
+- `results/benchmark/<group>/test/` — holdout metrics, predictions, SHAP plots
+- `results/benchmark/<group>/species_accuracy.csv`
+- `results/benchmark/all/test/models/` — saved RF/XGB joblib models
+- `results/benchmark/xgb_best_params.csv`
 - `results/benchmark/class_species_block_split_summary.csv`
 
-Current best benchmark result on the full test set:
+Current best holdout result on the full test set (`log10(BMR)`):
 - Model: `xgboost`
-- RMSE: 1.0325
-- MAE: 0.1391
-- R2: 0.9459
+- RMSE: 0.3327
+- MAE: 0.2332
+- R2: 0.9511
 
-### Step 8: M0-M4 Tree-Based ML Comparison
+### Step 8: M1-M4 Tree-Based ML Comparison
 
 Script: `code/explore_ml.py`
 
 Inputs:
-- `data/splits/train.csv`
-- `data/splits/test.csv`
+- `data/splits/test/train.csv`
+- `data/splits/test/test.csv`
 
 Output directory:
-- `results/explore/`
+- `results/explore/test/`
 
 ```bash
 python code/explore_ml.py
 ```
 
-This step compares Random Forest and XGBoost under M0-M4 feature settings and writes:
-- `results/explore/explore_ml_metrics.csv`
-- `results/explore/explore_ml_predictions_test.csv`
-- `results/explore/explore_ml_model_performance_comparison.png`
-- `results/explore/explore_ml_residual_plot.png`
+This step compares Random Forest and XGBoost under M1–M4 feature settings:
+- m1: `log_mass`
+- m2: `log_mass + inv_kT`
+- m3: `log_mass + inv_kT + class`
+- m4: `log_mass + inv_kT + pc1`–`pc5`
+
+Key outputs:
+- `results/explore/test/explore_ml_metrics.csv`
+- `results/explore/test/explore_ml_predictions_test.csv`
+- `results/explore/explore_ml_species_accuracy.csv`
 
 Current best model from this comparison:
-- Model: `xgboost_m3`
-- RMSE: 1.7923
-- MAE: 0.1994
-- R2: 0.8370
+- Model: `random_forest_m3`
+- RMSE: 0.3884
+- MAE: 0.2754
+- R2: 0.9333
 
 ### Step 9: PGLS Model Comparison with `ape` and `nlme`
 
 Script: `code/pgls_ape.R`
 
 Inputs:
-- `data/splits/train.csv`
-- `data/splits/test.csv`
+- `data/splits/test/train.csv`
+- `data/splits/test/test.csv`
 - `data/phylogeny/unique_taxon_names.nwk`
 
 Output directory:
-- `results/pgls_ape/`
+- `results/pgls_ape/test/` (when invoked by `explore.py`; standalone runs may write under `results/pgls_ape/`)
 
 ```bash
 Rscript code/pgls_ape.R
 ```
 
-This step fits PGLS models with the same fixed-effects formula, `log_BMR ~ log_mass + inv_kT`, and compares phylogenetic correlation structures by AIC:
+This step fits PGLS models with the fixed-effects formula `log_BMR ~ log_mass + inv_kT` and compares phylogenetic correlation structures by AIC:
 - Pagel lambda
 - Brownian
 - Martins
@@ -227,29 +239,27 @@ This step fits PGLS models with the same fixed-effects formula, `log_BMR ~ log_m
 - Grafen
 
 Key outputs:
-- `results/pgls_ape/pgls_aic_scores.csv`
-- `results/pgls_ape/pgls_test_predictions.csv`
-- `results/pgls_ape/pgls_train_fitted.csv`
-- `results/pgls_ape/pgls_test_metrics.csv`
-- `results/pgls_ape/pgls_best_model_summary.txt`
-- `results/pgls_ape/pgls_metrics_summary.txt`
+- `pgls_aic_scores.csv`
+- `pgls_test_predictions.csv`
+- `pgls_train_fitted.csv`
+- `pgls_test_metrics.csv`
+- `pgls_best_model_summary.txt`
 
-Current BMR-scale PGLS test metrics:
+Current holdout PGLS metrics (`log10(BMR)`, n=1,014):
 - Best correlation structure: `pglsModel_Brownian`
-- RMSE: 2.2985
-- MAE: 0.5911
-- R2: -0.0593
+- RMSE: 0.6956
+- MAE: 0.5894
+- R2: 0.7863
 
-### Step 10: Integrated MTE, PGLMM, PGLS, and ML Comparison
+### Step 10: Integrated MTE, PGLS, and ML Comparison
 
 Script: `code/explore.py`
 
 Inputs:
-- `data/splits/train.csv`
-- `data/splits/test.csv`
-- `results/benchmark/all/benchmark_predictions_test.csv`
-- `results/pglmm_phyr/pglmm_test_predictions.csv`
-- `results/pgls_ape/pgls_test_predictions.csv`
+- `data/splits/`
+- residual-learning predictions from `results/benchmark/all/`
+- explore_ml predictions from `results/explore/`
+- PGLS via `code/pgls_ape.R` (called automatically if needed)
 
 Output directory:
 - `results/explore/`
@@ -258,21 +268,42 @@ Output directory:
 python code/explore.py
 ```
 
-This step fits linear MTE-style models (`M0-L` to `M3-L`), runs the PGLMM result as `M4-L`, runs the PGLS result as `M5-PGLS`, imports the latest all-test residual-learning predictions, and compares all models on the same species-block test set.
+This step fits linear MTE-style models (`M0-L` to `M4-L`), imports tree-based M1–M4 and residual-learning predictions, runs PGLS as `M4-PGLS`, and compares all models on the same species-block holdout test set.
 
 Key outputs:
-- `results/explore/explore_metrics.csv`
-- `results/explore/top5_plus_residual_learning_metrics.csv`
-- `results/explore/model_performance_comparison.png`
-- `results/explore/top5_plus_residual_learning_performance.png`
-- `results/explore/residual_plot_all_models.png`
+- `results/explore/test/explore_metrics.csv`
+- `results/explore/test/top5_plus_residual_learning_metrics.csv`
+- `results/explore/test/model_performance_comparison.png`
+- `results/explore/test/residual_plot_all_models.png`
+- `results/explore/explore_species_accuracy.csv`
 
-Current top integrated results:
-- `Residual-XGB`: RMSE 1.5599, MAE 0.3364, R2 0.5122
-- `M2-L`: RMSE 1.6872, MAE 0.4002, R2 0.4292
-- `M1-L`: RMSE 1.6890, MAE 0.4289, R2 0.4280
-- `M4-L` / PGLMM-phyr is included in the integrated plot.
-- `M5-PGLS` / ape-nlme PGLS is included in the integrated plot.
+Current top integrated holdout results (`log10(BMR)`):
+- `Residual-XGB`: RMSE 0.3327, MAE 0.2332, R2 0.9511
+- `Residual-RF`: RMSE 0.3355, MAE 0.2404, R2 0.9503
+- `M3-L`: RMSE 0.3469, MAE 0.2460, R2 0.9468
+- `M3-RF`: RMSE 0.3884, MAE 0.2754, R2 0.9333
+- `M4-PGLS`: RMSE 0.6956, MAE 0.5894, R2 0.7863
+
+### Step 11: Slope Estimates and Comparison Plots
+
+Script: `code/plot_slope_estimates.py`
+
+Inputs:
+- `data/splits/train.csv`
+- `data/splits/test/test.csv`
+- optional explore_ml / residual-learning prediction CSVs
+
+Output directory:
+- `results/plots/`
+
+```bash
+python code/plot_slope_estimates.py
+```
+
+This estimates the mass-scaling exponent `b` (with 95% CI) by class and writes comparison figures for linear M1–M4 and ML/residual models:
+- `results/plots/slope_estimates.png` / `.csv`
+- `results/plots/m1_m4_linear_comparison.png` / `.csv`
+- `results/plots/ml_residual_comparison.png` / `.csv`
 
 ### Optional Step: Block Cross-validation
 
@@ -291,19 +322,11 @@ Default summary output directory:
 python code/block_cv.py
 ```
 
-This creates two Roberts-style blocked validation datasets without changing the existing stratified split.
+This creates two Roberts-style blocked validation datasets without changing the existing fold/holdout split.
 
 Dataset 1: `fair_all`
 - Purpose: all classes appear in training and testing, while species are kept as complete blocks.
 - Bias control: residual-learning models use class-balanced sample weights, and reports include micro, macro-class, capped weighted macro-class, per-class, and per-block metrics.
-- Outputs:
-  - `data/splits/block_cv/fair_all/fold_*/train.csv`
-  - `data/splits/block_cv/fair_all/fold_*/test.csv`
-  - `results/block_cv/fair_all/cv_predictions.csv`
-  - `results/block_cv/fair_all/fold_metrics.csv`
-  - `results/block_cv/fair_all/metric_summary.csv`
-  - `results/block_cv/fair_all/per_class_metrics.csv`
-  - `results/block_cv/fair_all/per_block_metrics.csv`
 
 Dataset 2: `leave_class_out`
 - Purpose: train without one target class, then predict that held-out class.
@@ -311,21 +334,34 @@ Dataset 2: `leave_class_out`
   - `A`: train without `Teleostei`, predict `Teleostei`.
   - `B`: train without `Mammalia`, predict `Mammalia`.
   - `C`: train without `Insecta`, predict `Insecta`.
-- Outputs:
-  - `data/splits/block_cv/leave_class_out/A|B|C/train.csv`
-  - `data/splits/block_cv/leave_class_out/A|B|C/test.csv`
-  - `results/block_cv/leave_class_out/A|B|C/benchmark_predictions_test.csv`
-  - `results/block_cv/leave_class_out/A|B|C/benchmark_metrics.csv`
-  - `results/block_cv/leave_class_out/benchmark_summary_groups.csv`
 
 Use `--skip-models` to only write train/test CSV files.
 
-## 5. Utility Script
+## 5. Utility Scripts
+
+### `code/generate_dataset_overview.py`
+
+Summarize observation/species/class counts from the current splits and write:
+- `results/dataset_overview/dataset_overview.txt`
+- `results/dataset_overview/dataset_class_summary.csv`
+- pie-chart figures under `results/dataset_overview/`
+
+### `code/generate_data_compilation_report.py`
+
+Tabulate species/class counts across cleaning pipeline stages into:
+- `results/data_compilation/data_flow_table.csv`
+
+### `code/export_xgb_residual_accuracy.py`
+
+Map Residual-XGB species-level accuracy onto the phylogeny and export PhyloXML / HTML / PNG assets under `results/plots/`.
+
+### `code/low_accuracy_class_summary.py`
+
+Summarize low-accuracy species fractions by class for residual-learning predictions.
 
 ### `code/class_distribution.py`
 
-Purpose:
-- Summarize class distributions for one or more CSV files.
+Summarize class distributions for one or more CSV files.
 
 Default output:
 - `data/cleaning/class_distribution.csv`
@@ -335,6 +371,10 @@ Example:
 ```bash
 python code/class_distribution.py --input data/cleaning/standard_data.csv
 ```
+
+### `code/bmr_models.py`
+
+Standalone experiment script (avg/nonleaky splits × lm/RF/XGB × m1–m4). Not part of the main reproducible pipeline; may require extra packages (`dendropy`, `scipy`).
 
 ## 6. Minimal Reproducible Command List
 
@@ -347,7 +387,13 @@ python code/merge_phylo_embedding.py
 python code/split_train_test_bmr.py
 python code/ml_residual_learning.py
 python code/explore_ml.py
-Rscript code/pglmm_phyr.R
 python code/explore.py
+python code/plot_slope_estimates.py
 ```
 
+Optional overview helpers:
+
+```bash
+python code/generate_dataset_overview.py
+python code/generate_data_compilation_report.py
+```
