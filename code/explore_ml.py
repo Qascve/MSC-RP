@@ -32,16 +32,15 @@ MODEL_FEATURES: dict[str, list[str]] = {
     "m4": ["log_mass", "inv_kT", "pc1", "pc2", "pc3", "pc4", "pc5"],
 }
 
-# Matched to ml_residual_learning.py
-N_HP_TRIALS = 50
+# Matched to ml_residual_learning.py (same grids, early stopping, 4-fold CV).
+N_HP_TRIALS = 9
 EARLY_STOPPING_ROUNDS = 100
 XGB_MAX_ESTIMATORS = 1000
 RF_TREE_BATCH = 50
 RF_MAX_ESTIMATORS = 1000
-INNER_VAL_FRAC = 0.2
+CV_FOLD_NAMES = ("fold1", "fold2", "fold3", "fold4")
 # Tune HPs once on the richest feature set, reuse across M1–M4.
 HP_TUNE_SPEC = "m4"
-# Shared with XGB grid only; XGB-only params are not copied onto RF.
 RF_PARAM_GRID = {
     "max_depth": [4, 6, 8],
 }
@@ -49,13 +48,10 @@ RF_FIXED_PARAMS = {
     "min_samples_leaf": 5,
     "max_features": 1.0,
 }
+# Only these keys are searched; all other XGB hyperparameters use library defaults.
 XGB_PARAM_GRID = {
     "max_depth": [4, 6, 8],
-    "learning_rate": [0.01, 0.05, 0.08],
-    "subsample": [0.6, 0.7],
-    "colsample_bytree": [0.6, 0.7],
-    "reg_lambda": [0.9, 2.0, 5.0],
-    "min_child_weight": [3, 5],
+    "learning_rate": [0.01, 0.02, 0.03],
 }
 
 
@@ -286,6 +282,10 @@ def evaluate_reporting_suite(
     }
 
 
+def _params_key(params: dict) -> tuple:
+    return tuple(sorted((k, params[k]) for k in params))
+
+
 def _cartesian_param_dicts(grid: dict) -> list[dict]:
     keys = list(grid.keys())
     combos: list[dict] = [{}]
@@ -294,16 +294,45 @@ def _cartesian_param_dicts(grid: dict) -> list[dict]:
     return combos
 
 
-def draw_unique_param_sets(
-    grid: dict, n_trials: int, rng: np.random.Generator, model_name: str
-) -> list[dict]:
-    pool = _cartesian_param_dicts(grid)
-    if n_trials > len(pool):
-        raise ValueError(
-            f"{model_name}: requested {n_trials} unique trials but grid only has {len(pool)}."
-        )
-    order = rng.permutation(len(pool))
-    return [dict(pool[int(i)]) for i in order[:n_trials]]
+def draw_unique_param_sets(grid: dict, n_trials: int, random_state: int) -> list[dict]:
+    """Randomly draw unique parameter combinations without replacement."""
+    all_combinations = _cartesian_param_dicts(grid)
+    total = len(all_combinations)
+    if total == 0:
+        raise ValueError("Parameter grid produced no combinations.")
+    if len({_params_key(params) for params in all_combinations}) != total:
+        raise ValueError("XGB_PARAM_GRID contains duplicate parameter combinations.")
+    if n_trials < 1:
+        raise ValueError(f"n_hp_trials must be >= 1; got {n_trials}.")
+    n_draw = min(int(n_trials), total)
+    if n_draw == total:
+        return list(all_combinations)
+    rng = np.random.default_rng(random_state)
+    selected = rng.choice(total, size=n_draw, replace=False)
+    return [all_combinations[int(i)] for i in selected]
+
+
+def make_xgb_regressor(
+    *,
+    n_estimators: int,
+    learning_rate: float,
+    max_depth: int,
+    random_state: int,
+    early_stopping_rounds: int | None = None,
+) -> XGBRegressor:
+    """Build XGBRegressor using searched HPs only; remaining args stay at XGBoost defaults."""
+    kwargs: dict = {
+        "objective": "reg:squarederror",
+        "n_estimators": int(n_estimators),
+        "learning_rate": float(learning_rate),
+        "max_depth": int(max_depth),
+        "random_state": int(random_state),
+        "n_jobs": -1,
+        "eval_metric": "rmse",
+    }
+    if early_stopping_rounds is not None:
+        kwargs["early_stopping_rounds"] = int(early_stopping_rounds)
+    return XGBRegressor(**kwargs)
 
 
 def fit_rf_with_early_stopping(
@@ -366,18 +395,11 @@ def fit_xgb_with_early_stopping(
     sample_weight_val: np.ndarray | None,
     random_state: int,
 ) -> tuple[XGBRegressor, int, float]:
-    xgb = XGBRegressor(
-        objective="reg:squarederror",
+    xgb = make_xgb_regressor(
         n_estimators=XGB_MAX_ESTIMATORS,
         learning_rate=params["learning_rate"],
         max_depth=params["max_depth"],
-        subsample=params["subsample"],
-        colsample_bytree=params["colsample_bytree"],
-        reg_lambda=params["reg_lambda"],
-        min_child_weight=params["min_child_weight"],
         random_state=random_state,
-        n_jobs=-1,
-        eval_metric="rmse",
         early_stopping_rounds=EARLY_STOPPING_ROUNDS,
     )
     fit_kwargs: dict = {
@@ -398,24 +420,70 @@ def model_key(algo: str, spec: str) -> str:
     return f"{algo}_{spec}"
 
 
-def tune_shared_hyperparams(
-    train_df: pd.DataFrame, random_state: int, n_trials: int
-) -> dict:
-    # Species-block HP search on HP_TUNE_SPEC features; shared by all M1–M4.
-    fit_df, val_df = species_block_train_val_split(
-        train_df, val_frac=INNER_VAL_FRAC, random_state=random_state
-    )
-    feature_cols = MODEL_FEATURES[HP_TUNE_SPEC]
-    X_fit, X_val = encode_features(fit_df, val_df, feature_cols)
-    y_fit = fit_df[LOG_TARGET].to_numpy(dtype=float)
-    y_val = val_df[LOG_TARGET].to_numpy(dtype=float)
-    sw_fit = make_class_balanced_sample_weight(fit_df)
-    sw_val = make_class_balanced_sample_weight(val_df)
+def to_display_model_name(model_name: str) -> str:
+    """Map internal keys like random_forest_m3 -> M3-RF (Table 1 naming)."""
+    if model_name.startswith("random_forest_"):
+        suffix = model_name.replace("random_forest_", "", 1)
+        return f"{suffix.upper()}-RF"
+    if model_name.startswith("xgboost_"):
+        suffix = model_name.replace("xgboost_", "", 1)
+        return f"{suffix.upper()}-XGB"
+    return model_name
 
-    rng = np.random.default_rng(random_state)
-    # RF grid is small (shared max_depth only); evaluate the full Cartesian set.
-    rf_sets = _cartesian_param_dicts(RF_PARAM_GRID)
-    xgb_sets = draw_unique_param_sets(XGB_PARAM_GRID, n_trials, rng, "xgboost")
+
+def load_four_fold_cv_splits(split_dir: Path) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
+    """Load fold1–fold4 species-block CV splits (same protocol as residual learning)."""
+    found: list[tuple[str, pd.DataFrame, pd.DataFrame]] = []
+    for name in CV_FOLD_NAMES:
+        train_path = split_dir / name / "train.csv"
+        val_path = split_dir / name / "test.csv"
+        if not train_path.exists() or not val_path.exists():
+            raise FileNotFoundError(
+                f"Missing CV fold under {split_dir / name}. "
+                "Expected fold1..fold4 from split_train_test_bmr.py."
+            )
+        fit_df = add_mte_features(load_split_data(train_path))
+        val_df = add_mte_features(load_split_data(val_path))
+        assert_no_species_leakage(fit_df, val_df)
+        found.append((name, fit_df, val_df))
+    return found
+
+
+def tune_shared_hyperparams(
+    cv_splits: list[tuple[str, pd.DataFrame, pd.DataFrame]],
+    random_state: int,
+    n_trials: int,
+) -> dict:
+    """4-fold species-block HP search on HP_TUNE_SPEC features; shared by all M1–M4."""
+    feature_cols = MODEL_FEATURES[HP_TUNE_SPEC]
+    prepared_splits: list[dict] = []
+    for fold_tag, fit_df, val_df in cv_splits:
+        X_fit, X_val = encode_features(fit_df, val_df, feature_cols)
+        prepared_splits.append(
+            {
+                "fold_tag": fold_tag,
+                "X_fit": X_fit,
+                "y_fit": fit_df[LOG_TARGET].to_numpy(dtype=float),
+                "X_val": X_val,
+                "y_val": val_df[LOG_TARGET].to_numpy(dtype=float),
+                "sw_fit": make_class_balanced_sample_weight(fit_df),
+                "sw_val": make_class_balanced_sample_weight(val_df),
+                "val_species": int(val_df["taxon_name"].nunique()),
+                "val_rows": int(len(val_df)),
+            }
+        )
+
+    rf_param_sets = _cartesian_param_dicts(RF_PARAM_GRID)
+    if not rf_param_sets:
+        raise ValueError("RF_PARAM_GRID produced no combinations.")
+    all_combinations = _cartesian_param_dicts(XGB_PARAM_GRID)
+    total_combinations = len(all_combinations)
+    xgb_param_sets = draw_unique_param_sets(
+        XGB_PARAM_GRID, n_trials=n_trials, random_state=random_state
+    )
+    n_combinations = len(xgb_param_sets)
+    if n_combinations == 0:
+        raise ValueError("XGB_PARAM_GRID produced no combinations.")
 
     best_rf: dict | None = None
     best_xgb: dict | None = None
@@ -423,55 +491,88 @@ def tune_shared_hyperparams(
     xgb_trials: list[dict] = []
 
     print(
-        f"  HP search on {HP_TUNE_SPEC}: RF={len(rf_sets)} configs, "
-        f"XGB={len(xgb_sets)} unique trials "
-        f"(inner val species={val_df['taxon_name'].nunique()}, rows={len(val_df)}; "
-        f"class-balanced sample weights)",
+        f"  HP search on {HP_TUNE_SPEC} (matched to residual learning): "
+        f"RF={len(rf_param_sets)} configs, XGB={n_combinations}/{total_combinations} "
+        f"unique trials x {len(prepared_splits)} folds "
+        f"(class-balanced sample weights)",
         flush=True,
     )
-    for trial, rf_p in enumerate(rf_sets):
-        _, rf_n, rf_score = fit_rf_with_early_stopping(
-            X_fit, y_fit, X_val, y_val, rf_p, sw_fit, random_state + trial
-        )
-        rf_row = {
-            **rf_p,
-            **RF_FIXED_PARAMS,
-            "n_estimators": rf_n,
-            "val_rmse": rf_score,
-            "trial": trial,
-        }
+    for trial, rf_p in enumerate(rf_param_sets):
+        fold_scores: list[float] = []
+        fold_estimators: list[int] = []
+        rf_row = {**rf_p, **RF_FIXED_PARAMS, "trial": trial}
+        for fold_idx, split in enumerate(prepared_splits):
+            _, rf_n, rf_score = fit_rf_with_early_stopping(
+                split["X_fit"],
+                split["y_fit"],
+                split["X_val"],
+                split["y_val"],
+                rf_p,
+                split["sw_fit"],
+                random_state + fold_idx,
+            )
+            fold_scores.append(rf_score)
+            fold_estimators.append(rf_n)
+            rf_row[f"{split['fold_tag']}_val_rmse"] = rf_score
+            rf_row[f"{split['fold_tag']}_n_estimators"] = rf_n
+        rf_row["cv_mean_rmse"] = float(np.mean(fold_scores))
+        rf_row["cv_std_rmse"] = float(np.std(fold_scores, ddof=0))
+        rf_row["n_estimators"] = max(1, int(round(np.mean(fold_estimators))))
         rf_trials.append(rf_row)
-        if best_rf is None or rf_score < best_rf["val_rmse"]:
+        if best_rf is None or rf_row["cv_mean_rmse"] < best_rf["cv_mean_rmse"]:
             best_rf = dict(rf_row)
         print(
-            f"    RF trial {trial + 1}/{len(rf_sets)}: val_rmse={rf_score:.4f} "
-            f"max_depth={rf_p['max_depth']} n={rf_n}",
+            f"    RF trial {trial + 1}/{len(rf_param_sets)}: "
+            f"max_depth={rf_p['max_depth']} "
+            f"cv_mean_rmse={rf_row['cv_mean_rmse']:.4f} "
+            f"n_estimators={rf_row['n_estimators']}",
             flush=True,
         )
 
-    for trial, xgb_p in enumerate(xgb_sets):
-        _, xgb_n, xgb_score = fit_xgb_with_early_stopping(
-            X_fit, y_fit, X_val, y_val, xgb_p, sw_fit, sw_val, random_state + trial
-        )
-        xgb_row = {**xgb_p, "n_estimators": xgb_n, "val_rmse": xgb_score, "trial": trial}
+    for trial, xgb_p in enumerate(xgb_param_sets):
+        fold_scores = []
+        fold_estimators = []
+        xgb_row = {**xgb_p, "trial": trial}
+        for fold_idx, split in enumerate(prepared_splits):
+            _, xgb_n, xgb_score = fit_xgb_with_early_stopping(
+                split["X_fit"],
+                split["y_fit"],
+                split["X_val"],
+                split["y_val"],
+                xgb_p,
+                split["sw_fit"],
+                split["sw_val"],
+                random_state + fold_idx,
+            )
+            fold_scores.append(xgb_score)
+            fold_estimators.append(xgb_n)
+            xgb_row[f"{split['fold_tag']}_val_rmse"] = xgb_score
+            xgb_row[f"{split['fold_tag']}_n_estimators"] = xgb_n
+        xgb_row["cv_mean_rmse"] = float(np.mean(fold_scores))
+        xgb_row["cv_std_rmse"] = float(np.std(fold_scores, ddof=0))
+        xgb_row["n_estimators"] = max(1, int(round(np.mean(fold_estimators))))
         xgb_trials.append(xgb_row)
-        if best_xgb is None or xgb_score < best_xgb["val_rmse"]:
+        if best_xgb is None or xgb_row["cv_mean_rmse"] < best_xgb["cv_mean_rmse"]:
             best_xgb = dict(xgb_row)
-
-        if (trial + 1) % 10 == 0 or trial == 0:
+        if (trial + 1) % 10 == 0 or trial == 0 or trial + 1 == n_combinations:
             print(
-                f"    XGB trial {trial + 1}/{len(xgb_sets)}: val_rmse={xgb_score:.4f}",
+                f"    XGB trial {trial + 1}/{n_combinations}: "
+                f"cv_mean_rmse={xgb_row['cv_mean_rmse']:.4f} "
+                f"best_so_far={best_xgb['cv_mean_rmse']:.4f}",
                 flush=True,
             )
 
     assert best_rf is not None and best_xgb is not None
     print(
-        f"  Best RF  trial={best_rf['trial']} val_rmse={best_rf['val_rmse']:.4f} "
-        f"n={best_rf['n_estimators']}",
+        f"  Best RF  trial={int(best_rf['trial']) + 1} "
+        f"cv_mean_rmse={best_rf['cv_mean_rmse']:.4f} "
+        f"max_depth={best_rf['max_depth']} n={best_rf['n_estimators']}",
         flush=True,
     )
     print(
-        f"  Best XGB trial={best_xgb['trial']} val_rmse={best_xgb['val_rmse']:.4f} "
+        f"  Best XGB trial={int(best_xgb['trial']) + 1} "
+        f"cv_mean_rmse={best_xgb['cv_mean_rmse']:.4f} "
+        f"params={{max_depth={best_xgb['max_depth']}, lr={best_xgb['learning_rate']}}} "
         f"n={best_xgb['n_estimators']}",
         flush=True,
     )
@@ -482,8 +583,10 @@ def tune_shared_hyperparams(
             "random_forest": pd.DataFrame(rf_trials),
             "xgboost": pd.DataFrame(xgb_trials),
         },
-        "inner_val_species": int(val_df["taxon_name"].nunique()),
-        "inner_val_rows": int(len(val_df)),
+        "inner_val_species": int(np.mean([s["val_species"] for s in prepared_splits])),
+        "inner_val_rows": int(np.mean([s["val_rows"] for s in prepared_splits])),
+        "cv_folds": [s["fold_tag"] for s in prepared_splits],
+        "hp_tune_spec": HP_TUNE_SPEC,
         "train_class_weighted": 1,
         "class_weight_formula": CLASS_BALANCED_WEIGHT_FORMULA,
     }
@@ -516,18 +619,11 @@ def train_all_specs(
         rf.fit(X, y_train, sample_weight=sw_train)
         models[model_key("random_forest", spec)] = rf
 
-        xgb = XGBRegressor(
-            objective="reg:squarederror",
+        xgb = make_xgb_regressor(
             n_estimators=int(xgb_bp["n_estimators"]),
-            learning_rate=xgb_bp["learning_rate"],
-            max_depth=xgb_bp["max_depth"],
-            subsample=xgb_bp["subsample"],
-            colsample_bytree=xgb_bp["colsample_bytree"],
-            reg_lambda=xgb_bp["reg_lambda"],
-            min_child_weight=xgb_bp["min_child_weight"],
+            learning_rate=float(xgb_bp["learning_rate"]),
+            max_depth=int(xgb_bp["max_depth"]),
             random_state=random_state,
-            n_jobs=-1,
-            eval_metric="rmse",
         )
         xgb.fit(X, y_train, sample_weight=sw_train, verbose=False)
         models[model_key("xgboost", spec)] = xgb
@@ -561,6 +657,9 @@ def save_model_bundle(bundle: dict, tune: dict, model_dir: Path, fold_tag: str) 
         },
         "inner_val_species": tune["inner_val_species"],
         "inner_val_rows": tune["inner_val_rows"],
+        "cv_folds": tune.get("cv_folds", list(CV_FOLD_NAMES)),
+        "hp_tune_spec": tune.get("hp_tune_spec", HP_TUNE_SPEC),
+        "hp_protocol": "4-fold species-block CV on fold1..fold4; matched to ml_residual_learning.py",
         "model_features": MODEL_FEATURES,
         "train_class_weighted": 1,
         "class_weight_formula": CLASS_BALANCED_WEIGHT_FORMULA,
@@ -676,9 +775,17 @@ def save_outputs(
                 [
                     "Evaluation protocol (explore_ml.py)",
                     "",
+                    "Hyper-parameter search (matched to ml_residual_learning.py):",
+                    "- 4-fold species-block CV on fold1..fold4",
+                    f"- Feature set for tuning: {HP_TUNE_SPEC}; selected HPs reused for M1–M4",
+                    "- RF search: max_depth in {4,6,8}; fixed min_samples_leaf=5, max_features=1.0",
+                    "- XGB search: max_depth in {4,6,8} x learning_rate in {0.01,0.02,0.03}",
+                    "  (other XGB args use library defaults)",
+                    "- n_estimators chosen by early stopping (patience 100; max 1000)",
+                    "",
                     "Training:",
                     f"- Class-balanced sample weights: {CLASS_BALANCED_WEIGHT_FORMULA}",
-                    "- Applied to RF/XGB HP search (fit fold) and final M1–M4 retraining.",
+                    "- Applied to RF/XGB HP search and final M1–M4 retraining on full development set.",
                     "",
                     "Reported metrics:",
                     "- rmse/mae/r2: micro-averaged over pooled evaluation rows",
@@ -705,28 +812,31 @@ def save_outputs(
         print(metrics_df.to_string(index=False))
         return metrics_df
 
+    plot_df = metrics_df.copy()
+    plot_df["model"] = plot_df["model"].map(to_display_model_name)
+
     sns.set_theme(style="whitegrid")
-    fig_width = max(12.0, 0.8 * len(metrics_df) + 6.0)
+    fig_width = max(12.0, 0.8 * len(plot_df) + 6.0)
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, 5))
-    sns.barplot(data=metrics_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
+    sns.barplot(data=plot_df, x="model", y="rmse", ax=axes[0], color="#4C72B0")
     axes[0].set_title("RMSE (log10(BMR))")
     axes[0].tick_params(axis="x", rotation=45)
-    sns.barplot(data=metrics_df, x="model", y="r2", ax=axes[1], color="#C44E52")
+    sns.barplot(data=plot_df, x="model", y="r2", ax=axes[1], color="#C44E52")
     axes[1].set_title("R2 (log10(BMR))")
     axes[1].tick_params(axis="x", rotation=45)
     for ax in axes:
         ax.set_xlabel("")
     fig.suptitle(f"ML Model Performance ({fold_tag})", fontsize=14)
     fig.tight_layout()
-    fig.savefig(fold_out / "explore_ml_model_performance_comparison.png", dpi=180, bbox_inches="tight")
+    fig.savefig(fold_out / "explore_ml_model_performance_comparison.pdf", bbox_inches="tight")
     plt.close(fig)
 
     # Class-balanced companion plot.
     fig, axes = plt.subplots(1, 2, figsize=(fig_width, 5))
-    sns.barplot(data=metrics_df, x="model", y="rmse_bal", ax=axes[0], color="#4C72B0")
+    sns.barplot(data=plot_df, x="model", y="rmse_bal", ax=axes[0], color="#4C72B0")
     axes[0].set_title("RMSE_bal (log10(BMR))")
     axes[0].tick_params(axis="x", rotation=45)
-    sns.barplot(data=metrics_df, x="model", y="r2_bal", ax=axes[1], color="#C44E52")
+    sns.barplot(data=plot_df, x="model", y="r2_bal", ax=axes[1], color="#C44E52")
     axes[1].set_title("R2_bal (log10(BMR))")
     axes[1].tick_params(axis="x", rotation=45)
     for ax in axes:
@@ -734,8 +844,7 @@ def save_outputs(
     fig.suptitle(f"ML Model Performance class-balanced ({fold_tag})", fontsize=14)
     fig.tight_layout()
     fig.savefig(
-        fold_out / "explore_ml_model_performance_comparison_bal.png",
-        dpi=180,
+        fold_out / "explore_ml_model_performance_comparison_bal.pdf",
         bbox_inches="tight",
     )
     plt.close(fig)
@@ -749,7 +858,7 @@ def save_outputs(
     plt.title(f"ML Residual Plot ({fold_tag})")
     plt.legend(fontsize=7, ncol=2)
     plt.tight_layout()
-    plt.savefig(fold_out / "explore_ml_residual_plot.png", dpi=180)
+    plt.savefig(fold_out / "explore_ml_residual_plot.pdf", bbox_inches="tight")
     plt.close()
 
     print(f"[{fold_tag}] Saved metrics/predictions under {fold_out}")
@@ -766,10 +875,11 @@ def run_cv_fold(
     random_state: int,
     n_hp_trials: int,
     reset_hp_log: bool,
+    cv_splits: list[tuple[str, pd.DataFrame, pd.DataFrame]],
 ) -> None:
     model_dir = out_dir / fold_tag / "models"
     print(f"  Tuning + training M1–M4 on {len(train_df)} train rows...", flush=True)
-    tune = tune_shared_hyperparams(train_df, random_state, n_hp_trials)
+    tune = tune_shared_hyperparams(cv_splits, random_state, n_hp_trials)
     bundle = train_all_specs(train_df, tune, random_state)
     save_model_bundle(bundle, tune, model_dir, fold_tag)
     write_hp_search_trials_csv(out_dir, fold_tag, tune, reset=reset_hp_log)
@@ -852,9 +962,9 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Tune RF/XGB M1–M4 with class-balanced sample weights inside the 80% "
-            "development set, retrain on the complete development set, and evaluate "
-            "on held-out test with micro/macro/class-balanced metrics."
+            "Tune RF/XGB M1–M4 with the same 4-fold species-block HP protocol as "
+            "ml_residual_learning.py (XGB grid: max_depth x learning_rate), "
+            "retrain on the complete development set, and evaluate on held-out test."
         )
     )
     parser.add_argument("--split-dir", type=Path, default=Path("data/splits"))
@@ -867,13 +977,17 @@ def main() -> None:
     out_dir = _resolve_path(root, args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    cv_splits = load_four_fold_cv_splits(split_dir)
     fold_splits = discover_fold_splits(split_dir, ["test"])
     _, train_path, test_path = fold_splits[0]
     train_df = add_mte_features(load_split_data(train_path))
     test_df = add_mte_features(load_split_data(test_path))
     assert_no_species_leakage(train_df, test_df)
 
-    print("\n=== explore_ml test (direct development-train/test-eval) ===", flush=True)
+    print(
+        "\n=== explore_ml test (4-fold CV HP tune + development-train/test-eval) ===",
+        flush=True,
+    )
     run_cv_fold(
         train_df=train_df,
         test_df=test_df,
@@ -882,6 +996,7 @@ def main() -> None:
         random_state=args.random_state,
         n_hp_trials=args.n_hp_trials,
         reset_hp_log=True,
+        cv_splits=cv_splits,
     )
     write_explore_ml_species_accuracy(out_dir, ["test"])
     print(f"\nWrote explore_ml test results under: {out_dir}/test/")

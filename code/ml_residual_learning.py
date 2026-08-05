@@ -971,7 +971,7 @@ def save_loss_curve_from_bundle(model_dir: Path, out_dir: Path) -> None:
     plt.title("XGBoost Early-Stopping Validation Loss")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(out_dir / "loss_curve.png", dpi=160)
+    plt.savefig(out_dir / "loss_curve.pdf", bbox_inches="tight")
     plt.close()
 
 
@@ -1009,7 +1009,7 @@ def save_pred_and_residual_plots(
         plt.title(f"Observed vs Predicted log10(BMR) ({model})")
         plt.legend()
         plt.tight_layout()
-        plt.savefig(out_dir / f"observed_vs_predicted_scatter_{model}.png", dpi=160)
+        plt.savefig(out_dir / f"observed_vs_predicted_scatter_{model}.pdf", bbox_inches="tight")
         plt.close()
 
     plt.figure(figsize=(8, 7))
@@ -1022,7 +1022,7 @@ def save_pred_and_residual_plots(
     plt.title("Residual Plot (log10(BMR))")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(out_dir / "residual_plot.png", dpi=160)
+    plt.savefig(out_dir / "residual_plot.pdf", bbox_inches="tight")
     plt.close()
 
 
@@ -1060,13 +1060,13 @@ def save_performance_boxplot(
     plt.ylabel("Bootstrap RMSE (log10(BMR))")
     plt.title("Model Performance Boxplot (log10(BMR))")
     plt.tight_layout()
-    plt.savefig(out_dir / "model_performance_boxplot.png", dpi=160)
+    plt.savefig(out_dir / "model_performance_boxplot.pdf", bbox_inches="tight")
     plt.close()
     return perf_df
 
 
 def _shap_feature_group(feature_name: str) -> str:
-    """Map raw design columns into fully pooled reporting groups (bar.png)."""
+    """Map raw design columns into fully pooled reporting groups (bar.pdf)."""
     name = str(feature_name)
     lower = name.lower()
     if lower.startswith("class_") or name == "class":
@@ -1214,15 +1214,15 @@ def save_shap_outputs(
     Write SHAP CSVs/plots for residual RF and XGB on the evaluation rows.
 
     Three plot types × two models (random_forest / xgboost):
-    - shap_summary_bar_{model}.png: fully grouped mean(|SHAP|)
+    - shap_summary_bar_{model}.pdf: fully grouped mean(|SHAP|)
       (taxonomy_class / phylogeny / mass / temperature)
-    - shap_summary_bar_raw_features_{model}.png: mean(|SHAP|) with 8 class_*
+    - shap_summary_bar_raw_features_{model}.pdf: mean(|SHAP|) with 8 class_*
       kept separate + phylogeny (PC1–5) + mass + temperature
-    - shap_summary_beeswarm_{model}.png: signed SHAP, PC1–5 summed into phylogeny
+    - shap_summary_beeswarm_{model}.pdf: signed SHAP, PC1–5 summed into phylogeny
     """
     def save_current_figure(path: Path) -> None:
         fig = plt.gcf()
-        fig.savefig(path, dpi=160, bbox_inches="tight")
+        fig.savefig(path, bbox_inches="tight")
         plt.close(fig)
 
     model_names = [name for name in MODEL_NAMES if name in models and name in shap_inputs]
@@ -1296,7 +1296,7 @@ def save_shap_outputs(
         plt.xlabel("mean(|SHAP|) over test observations")
         plt.title(f"Grouped SHAP importance ({model_name})")
         plt.tight_layout()
-        save_current_figure(out_dir / f"shap_summary_bar_{model_name}.png")
+        save_current_figure(out_dir / f"shap_summary_bar_{model_name}.pdf")
 
         # 2) Raw bar: 8 classes + phylogeny + mass + temperature
         plt.figure(figsize=(9, max(6.0, 0.35 * len(raw_imp) + 2.0)))
@@ -1305,7 +1305,7 @@ def save_shap_outputs(
         plt.xlabel("mean(|SHAP|) over test observations")
         plt.title(f"SHAP feature importance ({model_name})")
         plt.tight_layout()
-        save_current_figure(out_dir / f"shap_summary_bar_raw_features_{model_name}.png")
+        save_current_figure(out_dir / f"shap_summary_bar_raw_features_{model_name}.pdf")
 
         # 3) Beeswarm: signed SHAP; PC1–PC5 summed into phylogeny
         shap_merged, X_merged, _ = _build_pc_merged_shap_frame(shap_values, X_test_res)
@@ -1313,7 +1313,7 @@ def save_shap_outputs(
         shap.summary_plot(shap_merged, X_merged, show=False)
         plt.title(f"SHAP beeswarm ({model_name})")
         plt.tight_layout()
-        save_current_figure(out_dir / f"shap_summary_beeswarm_{model_name}.png")
+        save_current_figure(out_dir / f"shap_summary_beeswarm_{model_name}.pdf")
 
         print(f"  SHAP ({model_name}): wrote plots under {out_dir}", flush=True)
 
@@ -1345,11 +1345,11 @@ def save_shap_outputs(
                 "predicted log10(BMR): positive pushes up, negative pushes down.",
                 "",
                 "Six plots (3 types × random_forest / xgboost):",
-                "- shap_summary_bar_{model}.png: fully grouped mean(|SHAP|)",
+                "- shap_summary_bar_{model}.pdf: fully grouped mean(|SHAP|)",
                 "  (taxonomy_class, phylogeny, mass, temperature)",
-                "- shap_summary_bar_raw_features_{model}.png: mean(|SHAP|) with",
+                "- shap_summary_bar_raw_features_{model}.pdf: mean(|SHAP|) with",
                 "  8 class_* features + phylogeny (PC1–PC5) + mass + temperature",
-                "- shap_summary_beeswarm_{model}.png: signed SHAP beeswarm;",
+                "- shap_summary_beeswarm_{model}.pdf: signed SHAP beeswarm;",
                 "  PC1–PC5 SHAP values are summed into phylogeny (not abs first)",
                 "",
             ]

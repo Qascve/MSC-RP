@@ -167,10 +167,10 @@ main <- function() {
       legend.position = "right"
     )
 
-  output_path <- file.path(output_dir, "xgb_residual_phylogeny_accuracy.png")
-  ggsave(output_path, plot = plot, width = 10, height = 10, dpi = 300, bg = "white")
+  output_path <- file.path(output_dir, "xgb_residual_phylogeny_accuracy.pdf")
+  ggsave(output_path, plot = plot, width = 10, height = 10, device = "pdf", bg = "white")
   message("Plotted test-set tips: ", matched_tips)
-  message("Saved PNG: ", output_path)
+  message("Saved PDF: ", output_path)
 }
 
 main()

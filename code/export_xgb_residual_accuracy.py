@@ -617,7 +617,7 @@ def write_interactive_html(
     output_path.write_text(html_text, encoding="utf-8")
 
 
-def write_static_png(
+def write_static_pdf(
     tree: Phylo.BaseTree.Tree,
     tip_accuracy: dict[str, float],
     output_path: Path,
@@ -655,7 +655,7 @@ def write_static_png(
     ax.set_ylim(-500, 500)
     fig.tight_layout()
     cbar.ax.set_position([0.935, 0.24, 0.018, 0.52])
-    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -695,10 +695,10 @@ def main() -> None:
         help="Output standalone interactive HTML with hover tooltips.",
     )
     parser.add_argument(
-        "--png-output",
+        "--pdf-output",
         type=Path,
-        default=Path("results/plots/xgb_residual_phylogeny_accuracy.png"),
-        help="Output static PNG of the circular accuracy tree.",
+        default=Path("results/plots/xgb_residual_phylogeny_accuracy.pdf"),
+        help="Output static PDF of the circular accuracy tree.",
     )
     args = parser.parse_args()
 
@@ -707,11 +707,11 @@ def main() -> None:
     output_path = resolve_path(root, args.output)
     species_output_path = resolve_path(root, args.species_output)
     html_output_path = resolve_path(root, args.html_output)
-    png_output_path = resolve_path(root, args.png_output)
+    pdf_output_path = resolve_path(root, args.pdf_output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     species_output_path.parent.mkdir(parents=True, exist_ok=True)
     html_output_path.parent.mkdir(parents=True, exist_ok=True)
-    png_output_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_output_path.parent.mkdir(parents=True, exist_ok=True)
 
     tip_accuracy = load_tip_accuracy(predictions_path)
     tip_records = load_tip_records(predictions_path)
@@ -719,7 +719,7 @@ def main() -> None:
     matched_tips = prune_to_predicted_tips(tree, tip_accuracy)
     write_species_accuracy_table(tree, tip_accuracy, species_output_path)
     write_interactive_html(tree, tip_accuracy, tip_records, html_output_path)
-    write_static_png(tree, tip_accuracy, png_output_path)
+    write_static_pdf(tree, tip_accuracy, pdf_output_path)
     phylogeny = PhyloXML.Phylogeny.from_tree(tree)
     annotate_clade(phylogeny.root, tip_accuracy)
 
@@ -728,7 +728,7 @@ def main() -> None:
     print(f"Saved PhyloXML: {output_path}")
     print(f"Saved species accuracy table: {species_output_path}")
     print(f"Saved interactive HTML: {html_output_path}")
-    print(f"Saved static PNG: {png_output_path}")
+    print(f"Saved static PDF: {pdf_output_path}")
 
 
 if __name__ == "__main__":

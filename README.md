@@ -273,8 +273,8 @@ This step fits linear MTE-style models (`M0-L` to `M4-L`), imports tree-based M1
 Key outputs:
 - `results/explore/test/explore_metrics.csv`
 - `results/explore/test/top5_plus_residual_learning_metrics.csv`
-- `results/explore/test/model_performance_comparison.png`
-- `results/explore/test/residual_plot_all_models.png`
+- `results/explore/test/model_performance_comparison.pdf`
+- `results/explore/test/residual_plot_all_models.pdf`
 - `results/explore/explore_species_accuracy.csv`
 
 Current top integrated holdout results (`log10(BMR)`):
@@ -301,9 +301,9 @@ python code/plot_slope_estimates.py
 ```
 
 This estimates the mass-scaling exponent `b` (with 95% CI) by class and writes comparison figures for linear M1–M4 and ML/residual models:
-- `results/plots/slope_estimates.png` / `.csv`
-- `results/plots/m1_m4_linear_comparison.png` / `.csv`
-- `results/plots/ml_residual_comparison.png` / `.csv`
+- `results/plots/slope_estimates.pdf` / `.csv`
+- `results/plots/m1_m4_linear_comparison.pdf` / `.csv`
+- `results/plots/ml_residual_comparison.pdf` / `.csv`
 
 ### Optional Step: Block Cross-validation
 

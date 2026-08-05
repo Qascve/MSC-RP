@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -8,12 +8,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.utils.class_weight import compute_class_weight
 
 TARGET = "BMR"
 MASS_COL = "wet_Mass_kg"
@@ -21,51 +19,22 @@ TEMP_COL = "temperature"
 CLADE_COL = "class"
 LOG_TARGET = "log_BMR"
 K_BOLTZMANN_EV_PER_K = 8.617e-5
-MTE_FIXED_B = 0.75
-REFERENCE_SLOPE = MTE_FIXED_B
+M0_SLOPE = 0.75
+REFERENCE_SLOPE = M0_SLOPE
 CI_Z = 1.96
-# Display names follow Table 1: Mn-R / Mn-RF / Mn-XGB.
-# M-MTE is the fixed-b (3/4) version of M2: log_BMR ~ inv_kT + offset(0.75*log_mass).
-M_MTE_LABEL = "M-MTE"
-M1_L_LABEL = "M1-R"
-M2_L_LABEL = "M2-R"
-M3_L_LABEL = "M3-R"
-M4_L_LABEL = "M4-R"
-M3_L_SHORT_LABEL = "M3-R"
-M3_XGB_LABEL = "M3-XGB"
-M4_XGB_LABEL = "M4-XGB"
-M3_RF_LABEL = "M3-RF"
-M4_RF_LABEL = "M4-RF"
+M0_L_LABEL = "Fixed b"
+M1_L_LABEL = "Free b"
+M2_L_LABEL = "MTE"
+M3_L_LABEL = "MTE+class"
+M4_L_LABEL = "MTE+phylogeny"
+M3_L_SHORT_LABEL = "MTE"
+M3_XGB_LABEL = "XGB-MTE"
+M4_XGB_LABEL = "XGB-MTE+Class"
+M3_RF_LABEL = "RF-MTE"
+M4_RF_LABEL = "RF-MTE+Class"
 RESIDUAL_XGB_LABEL = "Residual-XGB"
 RESIDUAL_RF_LABEL = "Residual-RF"
 PHYLO_PC_COLS = ["pc1", "pc2", "pc3", "pc4", "pc5"]
-
-# Default matplotlib sizes + 2, all bold.
-FONT_SIZE = 12
-TITLE_SIZE = 14
-SUPTITLE_SIZE = 15
-LABEL_SIZE = 12
-TICK_SIZE = 12
-LEGEND_SIZE = 12
-
-
-def apply_bold_fonts(ax: Axes, *, title_size: int = TITLE_SIZE) -> None:
-    ax.set_title(ax.get_title(), fontsize=title_size, fontweight="bold")
-    ax.set_xlabel(ax.get_xlabel(), fontsize=LABEL_SIZE, fontweight="bold")
-    ax.set_ylabel(ax.get_ylabel(), fontsize=LABEL_SIZE, fontweight="bold")
-    ax.tick_params(axis="both", labelsize=TICK_SIZE)
-    for label in ax.get_xticklabels() + ax.get_yticklabels():
-        label.set_fontsize(TICK_SIZE)
-        label.set_fontweight("bold")
-    legend = ax.get_legend()
-    if legend is not None:
-        for text in legend.get_texts():
-            text.set_fontsize(LEGEND_SIZE)
-            text.set_fontweight("bold")
-        title = legend.get_title()
-        if title is not None and title.get_text():
-            title.set_fontsize(LEGEND_SIZE)
-            title.set_fontweight("bold")
 
 
 def find_root(marker: str = ".gitignore") -> Path:
@@ -223,94 +192,8 @@ def evaluate_log_predictions(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> 
     }
 
 
-def evaluate_weighted(
-    y_true_log: np.ndarray,
-    y_pred_log: np.ndarray,
-    sample_weight: np.ndarray,
-) -> dict[str, float]:
-    """Class-balanced weighted RMSE/MAE/R2 on log10(BMR)."""
-    y_true_log = np.asarray(y_true_log, dtype=float)
-    y_pred_log = np.asarray(y_pred_log, dtype=float)
-    sw = np.asarray(sample_weight, dtype=float)
-    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log) & np.isfinite(sw) & (sw > 0)
-    y_true_log = y_true_log[mask]
-    y_pred_log = y_pred_log[mask]
-    sw = sw[mask]
-    if len(y_true_log) == 0:
-        return {"rmse_bal": np.nan, "mae_bal": np.nan, "r2_bal": np.nan}
-    resid = y_true_log - y_pred_log
-    w_sum = float(np.sum(sw))
-    rmse_v = float(np.sqrt(np.sum(sw * resid**2) / w_sum))
-    mae = float(np.sum(sw * np.abs(resid)) / w_sum)
-    y_bar = float(np.sum(sw * y_true_log) / w_sum)
-    ss_tot = float(np.sum(sw * (y_true_log - y_bar) ** 2))
-    ss_res = float(np.sum(sw * resid**2))
-    r2 = float("nan") if ss_tot <= 0 else float(1.0 - ss_res / ss_tot)
-    return {"rmse_bal": rmse_v, "mae_bal": mae, "r2_bal": r2}
-
-
-def evaluate_macro_by_class(
-    y_true_log: np.ndarray,
-    y_pred_log: np.ndarray,
-    classes: np.ndarray,
-) -> dict[str, float]:
-    """Unweighted mean of per-class micro metrics (each class counts equally)."""
-    y_true_log = np.asarray(y_true_log, dtype=float)
-    y_pred_log = np.asarray(y_pred_log, dtype=float)
-    classes = np.asarray(classes)
-    rows = []
-    for cls in sorted(pd.unique(classes)):
-        mask = classes == cls
-        if not bool(np.any(mask)):
-            continue
-        rows.append(evaluate_log_predictions(y_true_log[mask], y_pred_log[mask]))
-    if not rows:
-        return {
-            "rmse_macro": np.nan,
-            "mae_macro": np.nan,
-            "r2_macro": np.nan,
-            "n_classes_eval": 0,
-        }
-    return {
-        "rmse_macro": float(np.nanmean([r["rmse"] for r in rows])),
-        "mae_macro": float(np.nanmean([r["mae"] for r in rows])),
-        "r2_macro": float(np.nanmean([r["r2"] for r in rows])),
-        "n_classes_eval": int(len(rows)),
-    }
-
-
-def evaluate_reporting_suite(
-    y_true_log: np.ndarray,
-    y_pred_log: np.ndarray,
-    classes: np.ndarray,
-) -> dict[str, float]:
-    """Micro, macro, and class-balanced weighted metrics (CSV only; plots use micro)."""
-    y_true_log = np.asarray(y_true_log, dtype=float)
-    y_pred_log = np.asarray(y_pred_log, dtype=float)
-    classes = np.asarray(classes)
-    mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
-    y_true_log = y_true_log[mask]
-    y_pred_log = y_pred_log[mask]
-    classes = classes[mask]
-    micro = evaluate_log_predictions(y_true_log, y_pred_log)
-    macro = evaluate_macro_by_class(y_true_log, y_pred_log, classes)
-    if len(classes) == 0:
-        bal = {"rmse_bal": np.nan, "mae_bal": np.nan, "r2_bal": np.nan}
-    else:
-        unique = np.unique(classes)
-        class_weights = compute_class_weight(
-            class_weight="balanced",
-            classes=unique,
-            y=classes,
-        )
-        weight_map = dict(zip(unique, class_weights))
-        sw = np.array([weight_map[c] for c in classes], dtype=float)
-        bal = evaluate_weighted(y_true_log, y_pred_log, sw)
-    return {**micro, **macro, **bal}
-
-
 def fit_m1_m2_on_train(train_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    # Fit M1-R and M2-R on train; return coefficients for each model.
+    #Fit M1-L and M2-L on train; return coefficients for each model.
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
     X1 = np.column_stack([np.ones(len(train_df)), train_df["log_mass"].to_numpy()])
     X2 = np.column_stack(
@@ -337,37 +220,28 @@ def predict_m1_m2(
     return predict_ols(X1, coef_m1), predict_ols(X2, coef_m2)
 
 
-def predict_m_mte(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
-    """Fixed-b MTE (M2 with mass slope locked at 3/4).
-
-    Equivalent to: log_BMR ~ inv_kT + offset(0.75 * log_mass)
-    """
+def predict_m0_fixed_b(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
+    #M0: log_BMR ~ intercept + 0.75 * log_mass (slope fixed).
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
-    log_mass_train = train_df["log_mass"].to_numpy(dtype=float)
-    log_mass_test = test_df["log_mass"].to_numpy(dtype=float)
-    y_adj = y_train - MTE_FIXED_B * log_mass_train
-    X_train = np.column_stack([np.ones(len(train_df)), train_df["inv_kT"].to_numpy(dtype=float)])
-    X_test = np.column_stack([np.ones(len(test_df)), test_df["inv_kT"].to_numpy(dtype=float)])
-    coef = fit_ols(X_train, y_adj)
-    return MTE_FIXED_B * log_mass_test + predict_ols(X_test, coef)
+    alpha = float(np.mean(y_train - M0_SLOPE * train_df["log_mass"].to_numpy(dtype=float)))
+    return alpha + M0_SLOPE * test_df["log_mass"].to_numpy(dtype=float)
 
 
 def build_m1_m4_linear_metrics(train_df: pd.DataFrame, test_df: pd.DataFrame) -> pd.DataFrame:
-    # M-MTE + M1–M4 (estimated-slope) models on the held-out test set.
+    # M0鈥揗4 prespecified models on the held-out test set.
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
     y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
-    classes = test_df[CLADE_COL].to_numpy()
-    pred_mte = predict_m_mte(train_df, test_df)
+    pred_m0 = predict_m0_fixed_b(train_df, test_df)
     coef_m1, coef_m2 = fit_m1_m2_on_train(train_df)
     pred_m1, pred_m2 = predict_m1_m2(test_df, coef_m1, coef_m2)
     pred_m3 = predict_m3_linear(train_df, test_df)
     pred_m4 = predict_ols(build_design_m4(test_df), fit_ols(build_design_m4(train_df), y_train))
     rows = [
-        {"model": M1_L_LABEL, **evaluate_reporting_suite(y_test, pred_m1, classes)},
-        {"model": M_MTE_LABEL, **evaluate_reporting_suite(y_test, pred_mte, classes)},
-        {"model": M2_L_LABEL, **evaluate_reporting_suite(y_test, pred_m2, classes)},
-        {"model": M3_L_LABEL, **evaluate_reporting_suite(y_test, pred_m3, classes)},
-        {"model": M4_L_LABEL, **evaluate_reporting_suite(y_test, pred_m4, classes)},
+        {"model": M0_L_LABEL, **evaluate_log_predictions(y_test, pred_m0)},
+        {"model": M1_L_LABEL, **evaluate_log_predictions(y_test, pred_m1)},
+        {"model": M2_L_LABEL, **evaluate_log_predictions(y_test, pred_m2)},
+        {"model": M3_L_LABEL, **evaluate_log_predictions(y_test, pred_m3)},
+        {"model": M4_L_LABEL, **evaluate_log_predictions(y_test, pred_m4)},
     ]
     return pd.DataFrame(rows)
 
@@ -378,10 +252,9 @@ def build_ml_residual_metrics(
     explore_ml_predictions_path: Path,
     residual_predictions_path: Path,
 ) -> pd.DataFrame:
-    """M-MTE + M3/M4 RF/XGB + Residual-RF/XGB on the held-out test set."""
+    """Prespecified MTE + M3/M4 RF/XGB + Residual-RF/XGB on the held-out test set."""
     y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
-    classes = test_df[CLADE_COL].to_numpy()
-    pred_mte = predict_m_mte(train_df, test_df)
+    pred_m3 = predict_m3_linear(train_df, test_df)
     pred_m3_xgb = load_prediction_column(
         explore_ml_predictions_path, "xgboost_m3", y_test, split_label="test"
     )
@@ -402,13 +275,13 @@ def build_ml_residual_metrics(
     )
 
     rows = [
-        {"model": M_MTE_LABEL, **evaluate_reporting_suite(y_test, pred_mte, classes)},
-        {"model": M3_RF_LABEL, **evaluate_reporting_suite(y_test, pred_m3_rf, classes)},
-        {"model": M4_RF_LABEL, **evaluate_reporting_suite(y_test, pred_m4_rf, classes)},
-        {"model": M3_XGB_LABEL, **evaluate_reporting_suite(y_test, pred_m3_xgb, classes)},
-        {"model": M4_XGB_LABEL, **evaluate_reporting_suite(y_test, pred_m4_xgb, classes)},
-        {"model": RESIDUAL_RF_LABEL, **evaluate_reporting_suite(y_test, pred_residual_rf, classes)},
-        {"model": RESIDUAL_XGB_LABEL, **evaluate_reporting_suite(y_test, pred_residual_xgb, classes)},
+        {"model": M3_L_SHORT_LABEL, **evaluate_log_predictions(y_test, pred_m3)},
+        {"model": M3_RF_LABEL, **evaluate_log_predictions(y_test, pred_m3_rf)},
+        {"model": M4_RF_LABEL, **evaluate_log_predictions(y_test, pred_m4_rf)},
+        {"model": M3_XGB_LABEL, **evaluate_log_predictions(y_test, pred_m3_xgb)},
+        {"model": M4_XGB_LABEL, **evaluate_log_predictions(y_test, pred_m4_xgb)},
+        {"model": RESIDUAL_RF_LABEL, **evaluate_log_predictions(y_test, pred_residual_rf)},
+        {"model": RESIDUAL_XGB_LABEL, **evaluate_log_predictions(y_test, pred_residual_xgb)},
     ]
     return pd.DataFrame(rows)
 
@@ -419,67 +292,43 @@ def save_rmse_r2_comparison_plot(metrics_df: pd.DataFrame, output_path: Path, ti
     fig_width = max(8.0, 1.8 * len(plot_df) + 4.0)
 
     sns.set_theme(style="whitegrid")
-    with plt.rc_context(
-        {
-            "font.weight": "bold",
-            "axes.labelweight": "bold",
-            "axes.titleweight": "bold",
-            "figure.titleweight": "bold",
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_SIZE,
-            "axes.labelsize": LABEL_SIZE,
-            "xtick.labelsize": TICK_SIZE,
-            "ytick.labelsize": TICK_SIZE,
-            "legend.fontsize": LEGEND_SIZE,
-            "figure.titlesize": SUPTITLE_SIZE,
-        }
-    ):
-        fig, axes = plt.subplots(1, 2, figsize=(fig_width, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(fig_width, 4.5))
 
-        sns.barplot(
-            data=plot_df,
-            x="model",
-            y="rmse",
-            order=model_order,
-            ax=axes[0],
-            color="#4C72B0",
-        )
-        axes[0].set_title("RMSE", fontsize=TITLE_SIZE, fontweight="bold")
-        axes[0].set_xlabel("")
-        axes[0].set_ylabel("rmse", fontsize=LABEL_SIZE, fontweight="bold")
-        axes[0].tick_params(axis="x", rotation=20, labelsize=TICK_SIZE)
-        axes[0].tick_params(axis="y", labelsize=TICK_SIZE)
+    sns.barplot(
+        data=plot_df,
+        x="model",
+        y="rmse",
+        order=model_order,
+        ax=axes[0],
+        color="#4C72B0",
+    )
+    axes[0].set_title("RMSE")
+    axes[0].set_xlabel("")
+    axes[0].tick_params(axis="x", rotation=20)
 
-        sns.barplot(
-            data=plot_df,
-            x="model",
-            y="r2",
-            order=model_order,
-            ax=axes[1],
-            color="#C44E52",
-        )
-        axes[1].set_title("R2", fontsize=TITLE_SIZE, fontweight="bold")
-        axes[1].set_xlabel("")
-        axes[1].set_ylabel("r2", fontsize=LABEL_SIZE, fontweight="bold")
-        axes[1].tick_params(axis="x", rotation=20, labelsize=TICK_SIZE)
-        axes[1].tick_params(axis="y", labelsize=TICK_SIZE)
+    sns.barplot(
+        data=plot_df,
+        x="model",
+        y="r2",
+        order=model_order,
+        ax=axes[1],
+        color="#C44E52",
+    )
+    axes[1].set_title("R2")
+    axes[1].set_xlabel("")
+    axes[1].tick_params(axis="x", rotation=20)
 
-        fig.suptitle(title, fontsize=SUPTITLE_SIZE, fontweight="bold")
-        fig.tight_layout()
-        for ax in axes:
-            apply_bold_fonts(ax)
-            for label in ax.get_xticklabels():
-                label.set_rotation(20)
-                label.set_horizontalalignment("right")
-        fig.savefig(output_path, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
 
 
 def save_m1_m4_linear_comparison_plot(metrics_df: pd.DataFrame, output_path: Path) -> None:
     save_rmse_r2_comparison_plot(
         metrics_df,
         output_path,
-        title="M-MTE and M1-M4 regression models on test set",
+        title="M1-M4 Prespecified models on test set",
     )
 
 
@@ -491,85 +340,42 @@ def save_ml_residual_comparison_plot(metrics_df: pd.DataFrame, output_path: Path
     )
 
 
-def fit_m2_mass_slope(
-    log_mass: np.ndarray,
-    inv_kT: np.ndarray,
-    log_bmr: np.ndarray,
-) -> tuple[float, float, float, float, int]:
-    """Temperature-corrected M2 OLS: log10(BMR) ~ 1 + b*log10(mass) + c*inv_kT.
-
-    Returns b, SE(b), intercept, temp_coef, n.
-    If temperature has no within-group variation, inv_kT is collinear with the
-    intercept; the identified mass slope then equals the mass-only slope and
-    temp_coef is reported as NaN.
-    """
+def fit_mass_slope(
+    log_mass: np.ndarray, log_bmr: np.ndarray
+) -> tuple[float, float, float, int]:
+    #OLS: log10(BMR) ~ intercept + b * log10(mass). Returns b, SE, intercept, n.
     x = np.asarray(log_mass, dtype=float)
-    t = np.asarray(inv_kT, dtype=float)
     y = np.asarray(log_bmr, dtype=float)
-    mask = np.isfinite(x) & np.isfinite(t) & np.isfinite(y)
+    mask = np.isfinite(x) & np.isfinite(y)
     x = x[mask]
-    t = t[mask]
     y = y[mask]
     n = int(len(x))
     if n < 3:
-        return float("nan"), float("nan"), float("nan"), float("nan"), n
+        return float("nan"), float("nan"), float("nan"), n
 
-    design_full = np.column_stack([np.ones(n, dtype=float), x, t])
-    rank = int(np.linalg.matrix_rank(design_full, tol=1e-10))
-    if rank < 3 or float(np.nanstd(t)) <= 0:
-        # Constant/collinear temperature: M2 mass slope reduces to mass-only b.
-        if n < 3:
-            return float("nan"), float("nan"), float("nan"), float("nan"), n
-        design = np.column_stack([np.ones(n, dtype=float), x])
-        coef, _, _, _ = np.linalg.lstsq(design, y, rcond=None)
-        fitted = design @ coef
-        resid = y - fitted
-        dof = n - design.shape[1]
-        if dof <= 0:
-            return float(coef[1]), float("nan"), float(coef[0]), float("nan"), n
-        mse = float(np.sum(resid**2) / dof)
-        try:
-            cov = mse * np.linalg.inv(design.T @ design)
-            se = float(np.sqrt(cov[1, 1]))
-        except np.linalg.LinAlgError:
-            se = float("nan")
-        return float(coef[1]), se, float(coef[0]), float("nan"), n
-
-    coef, _, _, _ = np.linalg.lstsq(design_full, y, rcond=None)
-    fitted = design_full @ coef
+    design = np.column_stack([np.ones(n, dtype=float), x])
+    coef, _, _, _ = np.linalg.lstsq(design, y, rcond=None)
+    fitted = design @ coef
     resid = y - fitted
-    dof = n - design_full.shape[1]
+    dof = n - design.shape[1]
     if dof <= 0:
-        return float(coef[1]), float("nan"), float(coef[0]), float(coef[2]), n
+        return float(coef[1]), float("nan"), float(coef[0]), n
 
     mse = float(np.sum(resid**2) / dof)
-    try:
-        cov = mse * np.linalg.inv(design_full.T @ design_full)
-        se = float(np.sqrt(cov[1, 1]))
-    except np.linalg.LinAlgError:
-        se = float("nan")
-    return float(coef[1]), se, float(coef[0]), float(coef[2]), n
+    cov = mse * np.linalg.inv(design.T @ design)
+    se = float(np.sqrt(cov[1, 1]))
+    return float(coef[1]), se, float(coef[0]), n
 
 
 def build_slope_summary(df: pd.DataFrame, min_rows: int) -> pd.DataFrame:
-    """Class/global mass slopes from M2 (mass + temperature), not mass-only M1."""
-    required = ["log_mass", "inv_kT", LOG_TARGET]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"build_slope_summary missing columns: {', '.join(missing)}")
-
-    global_b, global_se, global_intercept, global_temp, global_n = fit_m2_mass_slope(
-        df["log_mass"].to_numpy(),
-        df["inv_kT"].to_numpy(),
-        df[LOG_TARGET].to_numpy(),
+    global_b, global_se, global_intercept, global_n = fit_mass_slope(
+        df["log_mass"].to_numpy(), df[LOG_TARGET].to_numpy()
     )
 
     rows: list[dict[str, object]] = []
     for class_name, group in df.groupby(CLADE_COL, sort=True):
-        b, se, intercept, temp_coef, n = fit_m2_mass_slope(
-            group["log_mass"].to_numpy(),
-            group["inv_kT"].to_numpy(),
-            group[LOG_TARGET].to_numpy(),
+        b, se, intercept, n = fit_mass_slope(
+            group["log_mass"].to_numpy(), group[LOG_TARGET].to_numpy()
         )
         if n < min_rows or not np.isfinite(b):
             continue
@@ -582,7 +388,6 @@ def build_slope_summary(df: pd.DataFrame, min_rows: int) -> pd.DataFrame:
                 "ci95_low": b - ci95 if np.isfinite(ci95) else float("nan"),
                 "ci95_high": b + ci95 if np.isfinite(ci95) else float("nan"),
                 "intercept": intercept,
-                "temp_coef": temp_coef,
                 "n_rows": n,
                 "n_species": int(group["taxon_name"].nunique()) if "taxon_name" in group else n,
             }
@@ -592,10 +397,8 @@ def build_slope_summary(df: pd.DataFrame, min_rows: int) -> pd.DataFrame:
     summary.attrs["global_b"] = global_b
     summary.attrs["global_se"] = global_se
     summary.attrs["global_intercept"] = global_intercept
-    summary.attrs["global_temp_coef"] = global_temp
     summary.attrs["global_n"] = global_n
     summary.attrs["reference_b"] = REFERENCE_SLOPE
-    summary.attrs["slope_model"] = "M2: log_BMR ~ log_mass + inv_kT"
     return summary
 
 
@@ -608,108 +411,67 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
     y_pos = np.arange(len(classes))
 
     fig_height = max(4.5, 0.45 * len(classes) + 2.0)
-    with plt.rc_context(
-        {
-            "font.weight": "bold",
-            "axes.labelweight": "bold",
-            "axes.titleweight": "bold",
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_SIZE,
-            "axes.labelsize": LABEL_SIZE,
-            "xtick.labelsize": TICK_SIZE,
-            "ytick.labelsize": TICK_SIZE,
-            "legend.fontsize": LEGEND_SIZE,
-        }
-    ):
-        fig, ax = plt.subplots(figsize=(8.5, fig_height))
+    fig, ax = plt.subplots(figsize=(8.5, fig_height))
 
-        ax.errorbar(
-            summary["b"],
-            y_pos,
-            xerr=[
-                summary["b"] - summary["ci95_low"],
-                summary["ci95_high"] - summary["b"],
-            ],
-            fmt="o",
-            color="#4C72B0",
-            ecolor="#4C72B0",
-            elinewidth=1.2,
-            capsize=3,
-            markersize=6,
-            label="95% CI",
-            zorder=3,
-        )
+    ax.errorbar(
+        summary["b"],
+        y_pos,
+        xerr=[
+            summary["b"] - summary["ci95_low"],
+            summary["ci95_high"] - summary["b"],
+        ],
+        fmt="o",
+        color="#4C72B0",
+        ecolor="#4C72B0",
+        elinewidth=1.2,
+        capsize=3,
+        markersize=6,
+        label="95% CI",
+        zorder=3,
+    )
 
-        ax.axvline(
-            REFERENCE_SLOPE,
-            color="#C44E52",
-            linestyle="--",
-            linewidth=1.6,
-            label=f"b = {REFERENCE_SLOPE:.2f}",
-            zorder=2,
-        )
-        ax.axvline(
-            global_b,
-            color="#55A868",
-            linestyle="--",
-            linewidth=1.6,
-            label=f"estimated b = {global_b:.3f}",
-            zorder=2,
-        )
+    ax.axvline(
+        REFERENCE_SLOPE,
+        color="#C44E52",
+        linestyle="--",
+        linewidth=1.6,
+        label=f"b = {REFERENCE_SLOPE:.2f}",
+        zorder=2,
+    )
+    ax.axvline(
+        global_b,
+        color="#55A868",
+        linestyle="--",
+        linewidth=1.6,
+        label=f"estimated b = {global_b:.3f}",
+        zorder=2,
+    )
 
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(classes, fontsize=TICK_SIZE, fontweight="bold")
-        ax.set_xlabel(
-            "temperature-corrected mass-scaling exponent b (M2)",
-            fontsize=LABEL_SIZE,
-            fontweight="bold",
-        )
-        ax.set_ylabel("Class", fontsize=LABEL_SIZE, fontweight="bold")
-        ax.set_title(
-            "M2 mass-scaling exponent estimates (mass + temperature)",
-            fontsize=TITLE_SIZE,
-            fontweight="bold",
-        )
-        ax.grid(axis="x", alpha=0.25, linestyle=":")
-        ax.legend(loc="lower right", frameon=True, prop={"size": LEGEND_SIZE, "weight": "bold"})
-        apply_bold_fonts(ax)
-        fig.tight_layout()
-        fig.savefig(output_path, bbox_inches="tight", facecolor="white")
-        plt.close(fig)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(classes)
+    ax.set_xlabel("mass-scaling exponent b")
+    ax.set_ylabel("Class")
+    ax.set_title("Mass scaling exponent estimates")
+    ax.grid(axis="x", alpha=0.25, linestyle=":")
+    ax.legend(loc="lower right", frameon=True)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
 
 
 def write_summary_table(summary: pd.DataFrame, output_path: Path) -> None:
     global_b = float(summary.attrs["global_b"])
     global_se = float(summary.attrs["global_se"])
     global_n = int(summary.attrs["global_n"])
-    global_temp = float(summary.attrs.get("global_temp_coef", np.nan))
-    slope_model = str(summary.attrs.get("slope_model", "M2: log_BMR ~ log_mass + inv_kT"))
 
     meta = pd.DataFrame(
         [
-            {
-                "scope": "global",
-                "class": "(all)",
-                "b": global_b,
-                "se": global_se,
-                "n_rows": global_n,
-                "temp_coef": global_temp,
-                "model": slope_model,
-            },
-            {
-                "scope": "reference",
-                "class": "(all)",
-                "b": REFERENCE_SLOPE,
-                "se": np.nan,
-                "n_rows": global_n,
-                "temp_coef": np.nan,
-                "model": "MTE fixed b = 0.75",
-            },
+            {"scope": "global", "class": "(all)", "b": global_b, "se": global_se, "n_rows": global_n},
+            {"scope": "reference", "class": "(all)", "b": REFERENCE_SLOPE, "se": np.nan, "n_rows": global_n},
         ]
     )
     class_rows = summary.copy()
     class_rows.insert(0, "scope", "class")
-    class_rows["model"] = slope_model
     out = pd.concat([meta, class_rows], ignore_index=True, sort=False)
     out.to_csv(output_path, index=False, encoding="utf-8")
 
@@ -718,9 +480,8 @@ def main() -> None:
     root = find_root()
     parser = argparse.ArgumentParser(
         description=(
-            "Plot class-level temperature-corrected mass-scaling exponent b "
-            "(from M2: log_BMR ~ log_mass + inv_kT) with 95% CI, "
-            "plus reference lines at b = 0.75 and the global M2 estimate."
+            "Plot class-level mass-scaling exponent b with 95% CI, "
+            "plus reference lines at b = 0.75 and the global estimate."
         )
     )
     parser.add_argument(
@@ -738,8 +499,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("results/plots/slope_estimates.pdf"),
-        help="Output PDF path.",
+        default=Path("results/plots/slope_estimates.png"),
+        help="Output PNG path.",
     )
     parser.add_argument(
         "--summary-output",
@@ -756,14 +517,14 @@ def main() -> None:
     parser.add_argument(
         "--m1-m4-linear-output",
         type=Path,
-        default=Path("results/plots/m1_m4_linear_comparison.pdf"),
-        help="Output PDF for M1–M4 linear RMSE/R2 comparison on test set.",
+        default=Path("results/plots/m1_m4_linear_comparison.png"),
+        help="Output PNG for M1鈥揗4 linear RMSE/R2 comparison on test set.",
     )
     parser.add_argument(
         "--m1-m4-linear-metrics-output",
         type=Path,
         default=Path("results/plots/m1_m4_linear_comparison.csv"),
-        help="Output CSV for M1–M4 linear test metrics.",
+        help="Output CSV for M1鈥揗4 linear test metrics.",
     )
     parser.add_argument(
         "--explore-ml-predictions",
@@ -780,14 +541,14 @@ def main() -> None:
     parser.add_argument(
         "--ml-residual-output",
         type=Path,
-        default=Path("results/plots/ml_residual_comparison.pdf"),
-        help="Output PDF for M-MTE / M3-XGB / M4-XGB / Residual-RF / Residual-XGB.",
+        default=Path("results/plots/ml_residual_comparison.png"),
+        help="Output PNG for M3-L / M3-XGB / M4-XGB / Residual-RF / Residual-XGB.",
     )
     parser.add_argument(
         "--ml-residual-metrics-output",
         type=Path,
         default=Path("results/plots/ml_residual_comparison.csv"),
-        help="Output CSV for M-MTE / M3-XGB / M4-XGB / Residual-RF / Residual-XGB.",
+        help="Output CSV for M3-L / M3-XGB / M4-XGB / Residual-RF / Residual-XGB.",
     )
     args = parser.parse_args()
 
@@ -833,34 +594,22 @@ def main() -> None:
     # Remove superseded comparison artifacts.
     for stale in (
         output_path.parent / "m1_m2_linear_comparison.png",
-        output_path.parent / "m1_m2_linear_comparison.pdf",
         output_path.parent / "m1_m2_linear_comparison.csv",
         output_path.parent / "m2_m3_m4_linear_comparison.png",
-        output_path.parent / "m2_m3_m4_linear_comparison.pdf",
         output_path.parent / "m2_m3_m4_linear_comparison.csv",
         output_path.parent / "m3_ml_residual_comparison.png",
-        output_path.parent / "m3_ml_residual_comparison.pdf",
         output_path.parent / "m3_ml_residual_comparison.csv",
-        # Superseded PNG versions of current PDF outputs.
-        output_path.parent / "slope_estimates.png",
-        output_path.parent / "m1_m4_linear_comparison.png",
-        output_path.parent / "ml_residual_comparison.png",
     ):
         if stale.exists():
             stale.unlink()
 
     global_b = float(summary.attrs["global_b"])
-    global_temp = float(summary.attrs.get("global_temp_coef", np.nan))
-    print(f"Slope model: {summary.attrs.get('slope_model')}")
-    print(
-        f"Global M2 b = {global_b:.4f} "
-        f"(temp_coef = {global_temp:.4f}; reference b = {REFERENCE_SLOPE:.2f})"
-    )
+    print(f"Global b = {global_b:.4f} (reference b = {REFERENCE_SLOPE:.2f})")
     print(f"Plotted classes: {len(summary)}")
     print(f"Saved plot: {output_path}")
     print(f"Saved summary: {summary_output_path}")
-    print(f"Saved M1–M4 linear comparison plot: {m1_m4_linear_output_path}")
-    print(f"Saved M1–M4 linear comparison metrics: {m1_m4_linear_metrics_output_path}")
+    print(f"Saved M1鈥揗4 linear comparison plot: {m1_m4_linear_output_path}")
+    print(f"Saved M1鈥揗4 linear comparison metrics: {m1_m4_linear_metrics_output_path}")
     print(m1_m4_linear_metrics.to_string(index=False))
     print(f"Saved ML/residual comparison plot: {ml_residual_output_path}")
     print(f"Saved ML/residual comparison metrics: {ml_residual_metrics_output_path}")
@@ -869,3 +618,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

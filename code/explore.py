@@ -21,12 +21,14 @@ CLADE_COL = "class"
 K_BOLTZMANN_EV_PER_K = 8.617e-5
 PHYLO_PC_COLS = ["pc1", "pc2", "pc3", "pc4", "pc5"]
 ML_MODEL_SUFFIXES = ("m1", "m2", "m3", "m4")
+MTE_FIXED_B = 0.75
 LINEAR_NAME_MAP = {
-    "m0_fixed_b_3_4": "M0-L",
-    "m1_estimated_b": "M1-L",
-    "m2_baseline_mte": "M2-L",
-    "m3_clade_specific_mte": "M3-L",
-    "m4_phylo_linear_mte": "M4-L",
+    "m1_estimated_b": "M1-R",
+    # Fixed-b MTE: same predictors as M2, mass slope locked at 3/4.
+    "m_mte_fixed_b": "M-MTE",
+    "m2_baseline_mte": "M2-R",
+    "m3_clade_specific_mte": "M3-R",
+    "m4_phylo_linear_mte": "M4-R",
     "m4_pgls_ape_mte": "M4-PGLS",
 }
 
@@ -304,8 +306,8 @@ def to_short_model_name(model_name: str) -> str:
 
 
 LINEAR_MODEL_KEYS = (
-    "m0_fixed_b_3_4",
     "m1_estimated_b",
+    "m_mte_fixed_b",
     "m2_baseline_mte",
     "m3_clade_specific_mte",
     "m4_phylo_linear_mte",
@@ -636,7 +638,7 @@ def _build_model_metrics(
         y_t = y_true[comparison_mask]
         y_p = y_pred[comparison_mask]
         # Macro / class-balanced metrics only for models trained with class weights.
-        # Unweighted models (M0/M1/M2 linear, PGLS) keep micro rmse/mae/r2 only.
+        # Unweighted models (M1/M-MTE/M2 linear, PGLS) keep micro rmse/mae/r2 only.
         if model_name in CLASS_WEIGHTED_TRAIN_MODELS:
             suite = evaluate_reporting_suite(y_t, y_p, classes[comparison_mask])
         else:
@@ -675,14 +677,14 @@ def write_evaluation_protocol_note(out_dir: Path) -> Path:
             "  folds/test may lack that class. Classes kept in the working data with",
             "  enough species are represented across buckets when n_species >= 5.",
             "",
-            "Class-balanced sample weights (training for M3-L, M4-L, Residual-RF/XGB,",
+            "Class-balanced sample weights (training for M3-R, M4-R, Residual-RF/XGB,",
             "  and explore_ml RF/XGB M1–M4):",
             f"- {CLASS_BALANCED_WEIGHT_FORMULA}",
             "",
             "Reported metrics:",
             "- rmse/mae/r2: micro-averaged over all pooled evaluation rows (all models)",
             "- rmse_macro/mae_macro/r2_macro and rmse_bal/mae_bal/r2_bal: only for",
-            "  models trained with class-balanced weights (M3-L, M4-L, Residual-RF/XGB,",
+            "  models trained with class-balanced weights (M3-R, M4-R, Residual-RF/XGB,",
             "  explore_ml M1–M4 RF/XGB)",
             "- train_class_weighted=1 marks those models",
             "",
@@ -706,11 +708,6 @@ def run_models(
     # Same class-balanced weights as residual-learning XGB/RF.
     sw_train = make_class_balanced_sample_weight(train_df)
 
-    # m0: log_BMR ~ offset(0.75 * log_mass)
-    alpha_m0 = float(np.mean(y_train_log - 0.75 * train_df["log_mass"].to_numpy()))
-    yhat_m0_train = alpha_m0 + 0.75 * train_df["log_mass"].to_numpy()
-    yhat_m0_log = alpha_m0 + 0.75 * test_df["log_mass"].to_numpy()
-
     # m1: log_BMR ~ log_mass
     X1_train = np.column_stack([np.ones(len(train_df)), train_df["log_mass"].to_numpy()])
     X1_test = np.column_stack([np.ones(len(test_df)), test_df["log_mass"].to_numpy()])
@@ -718,7 +715,18 @@ def run_models(
     yhat_m1_train = predict_ols(X1_train, coef_m1)
     yhat_m1_log = predict_ols(X1_test, coef_m1)
 
-    # m2: log_BMR ~ log_mass + inv_kT
+    # m_mte: fixed-b MTE = M2 with mass slope locked at 3/4
+    # log_BMR ~ inv_kT + offset(0.75 * log_mass)
+    log_mass_train = train_df["log_mass"].to_numpy(dtype=float)
+    log_mass_test = test_df["log_mass"].to_numpy(dtype=float)
+    y_mte_adj = y_train_log - MTE_FIXED_B * log_mass_train
+    X_mte_train = np.column_stack([np.ones(len(train_df)), train_df["inv_kT"].to_numpy()])
+    X_mte_test = np.column_stack([np.ones(len(test_df)), test_df["inv_kT"].to_numpy()])
+    coef_mte = fit_ols(X_mte_train, y_mte_adj)
+    yhat_mte_train = MTE_FIXED_B * log_mass_train + predict_ols(X_mte_train, coef_mte)
+    yhat_mte_log = MTE_FIXED_B * log_mass_test + predict_ols(X_mte_test, coef_mte)
+
+    # m2: log_BMR ~ log_mass + inv_kT  (estimated b)
     X2_train = np.column_stack(
         [
             np.ones(len(train_df)),
@@ -765,8 +773,8 @@ def run_models(
 
     y_true = test_df["log_BMR"].to_numpy()
     predictions: dict[str, np.ndarray] = {
-        "m0_fixed_b_3_4": yhat_m0_log,
         "m1_estimated_b": yhat_m1_log,
+        "m_mte_fixed_b": yhat_mte_log,
         "m2_baseline_mte": yhat_m2_log,
         "m4_phylo_linear_mte": yhat_m4_log,
         "m4_pgls_ape_mte": pgls_predictions,
@@ -774,8 +782,8 @@ def run_models(
         **residual_learning_predictions,
     }
     train_predictions: dict[str, np.ndarray] = {
-        "m0_fixed_b_3_4": yhat_m0_train,
         "m1_estimated_b": yhat_m1_train,
+        "m_mte_fixed_b": yhat_mte_train,
         "m2_baseline_mte": yhat_m2_train,
         "m3_clade_specific_mte": yhat_m3_train,
         "m4_phylo_linear_mte": yhat_m4_train,
@@ -817,7 +825,7 @@ def run_models(
 
 
 def split_linear_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """Rows for linear/phylo M0–M4 only (exclude explore_ml + residual)."""
+    """Rows for linear/phylo M-MTE and M1–M4 only (exclude explore_ml + residual)."""
     if "model_key" in metrics_df.columns:
         mask = metrics_df["model_key"].isin(LINEAR_MODEL_KEYS)
         out = metrics_df.loc[mask].drop(columns=["model_key"], errors="ignore")
@@ -936,8 +944,8 @@ def save_model_performance_plot(
     fig.suptitle(title, fontsize=14)
     fig.tight_layout()
 
-    output_path = out_dir / "model_performance_comparison.png"
-    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    output_path = out_dir / "model_performance_comparison.pdf"
+    fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
     plot_df.to_csv(out_dir / "model_performance_comparison_metrics.csv", index=False, encoding="utf-8")
     return output_path
@@ -994,9 +1002,9 @@ def save_top5_plus_residual_learning_plot(
     fig.suptitle(title, fontsize=13)
     fig.tight_layout()
 
-    plot_path = out_dir / "top5_plus_residual_learning_performance.png"
+    plot_path = out_dir / "top5_plus_residual_learning_performance.pdf"
     data_path = out_dir / "top5_plus_residual_learning_metrics.csv"
-    fig.savefig(plot_path, dpi=180, bbox_inches="tight")
+    fig.savefig(plot_path, bbox_inches="tight")
     plt.close(fig)
     plot_df.to_csv(data_path, index=False, encoding="utf-8")
     return plot_path, data_path
@@ -1020,8 +1028,8 @@ def save_residual_plot(
     plt.title("Residual Plot (log10(BMR))")
     plt.legend()
     plt.tight_layout()
-    output_path = out_dir / "residual_plot_all_models.png"
-    plt.savefig(output_path, dpi=180)
+    output_path = out_dir / "residual_plot_all_models.pdf"
+    plt.savefig(output_path, bbox_inches="tight")
     plt.close()
     return output_path
 
@@ -1122,7 +1130,7 @@ def main() -> None:
     fold_name_map = {"test": "test"}
     parser = argparse.ArgumentParser(
         description=(
-            "Fit linear/phylo M0-M4 on the shared species-blocked held-out test "
+            "Fit linear/phylo M-MTE and M1-M4 on the shared species-blocked held-out test "
             "partition (not a single-split 'CV'), merge explore_ml and "
             "residual-learning test predictions, and write final test reports "
             "with micro, macro, and class-balanced weighted metrics."
@@ -1344,7 +1352,7 @@ def main() -> None:
 
         print(f"\n[{fold_tag}] TRAIN FIT (RMSE/MAE on log10(BMR)):")
         print(train_metrics_out.to_string(index=False))
-        print(f"\n[{fold_tag}] LINEAR / PHYLO M0-M4 (RMSE/MAE on log10(BMR)):")
+        print(f"\n[{fold_tag}] LINEAR / PHYLO M-MTE and M1-M4 (RMSE/MAE on log10(BMR)):")
         print(linear_metrics.to_string(index=False))
         print(f"\n[{fold_tag}] ALL MODELS (linear + ML + residual; RMSE/MAE on log10(BMR)):")
         print(metrics_out.to_string(index=False))

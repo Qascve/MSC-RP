@@ -81,7 +81,7 @@ def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> No
         autopct=autopct_for_large_slices(summary["observations"]),
         pctdistance=0.72,
         wedgeprops={"edgecolor": "white", "linewidth": 1.2},
-        textprops={"fontsize": 10, "color": "white", "weight": "bold"},
+        textprops={"fontsize": 8, "color": "black", "weight": "bold"},
     )
     for text in autotexts:
         text.set_path_effects([])
@@ -97,12 +97,12 @@ def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> No
         loc="center left",
         bbox_to_anchor=(1.0, 0.5),
         frameon=False,
-        fontsize=9,
-        title_fontsize=10,
+        fontsize=20,
+        title_fontsize=20,
         labelspacing=0.65,
         handlelength=1.2,
     )
-    ax.set_title("observations by class", fontsize=20, weight="bold", pad=18)
+    ax.set_title("Observations by clade", fontsize=25, weight="bold", pad=18)
     ax.text(
         0.5,
         0.02,
@@ -111,13 +111,12 @@ def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> No
         transform=fig.transFigure,
         ha="center",
         va="bottom",
-        fontsize=11,
+        fontsize=25,
         color="#404040",
     )
     ax.axis("equal")
     fig.subplots_adjust(left=0.03, right=0.72, top=0.88, bottom=0.08)
-    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(output_path.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -138,7 +137,7 @@ def main() -> None:
 
     summary_path = output_dir / "dataset_class_summary.csv"
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig", float_format="%.4f")
-    chart_path = output_dir / "class_observation_share_pie.png"
+    chart_path = output_dir / "class_observation_share_pie.pdf"
     draw_pie(summary, total_species, chart_path)
 
     overview_path = output_dir / "dataset_overview.txt"
@@ -157,7 +156,6 @@ def main() -> None:
     print(summary.to_string(index=False, formatters={"share_percent": lambda x: f"{x:.2f}%"}))
     print(f"Saved: {summary_path}")
     print(f"Saved: {chart_path}")
-    print(f"Saved: {chart_path.with_suffix('.svg')}")
     print(f"Saved: {overview_path}")
 
 
