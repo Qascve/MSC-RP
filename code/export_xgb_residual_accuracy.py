@@ -379,7 +379,7 @@ def write_interactive_html(
     .search-bar button:hover {{
       background: #ececec;
     }}
-    # search-status {{
+    #search-status {{
       width: 100%;
       text-align: center;
       font-size: 13px;
@@ -409,20 +409,23 @@ def write_interactive_html(
       pointer-events: none;
       visibility: hidden;
     }}
-    # tooltip {{
+    #tooltip {{
       position: fixed;
+      left: 0;
+      top: 0;
       display: none;
       pointer-events: none;
-      max-width: 300px;
+      max-width: 340px;
       padding: 9px 11px;
       border: 1px solid #bbb;
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.96);
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
       white-space: pre-line;
-      font-size: 13px;
+      font-size: 17px;
+      font-weight: bold;
       line-height: 1.35;
-      z-index: 10;
+      z-index: 1000;
     }}
     .legend-title {{
       font-size: 16px;
@@ -468,8 +471,8 @@ def write_interactive_html(
         <text class="legend-label" x="36" y="170">0.00</text>
       </g>
     </svg>
-    <div id="tooltip"></div>
   </div>
+  <div id="tooltip"></div>
   <script>
     const TIPS = {tips_json};
     const tooltip = document.getElementById("tooltip");
@@ -477,13 +480,14 @@ def write_interactive_html(
     const searchStatus = document.getElementById("search-status");
     const treeStage = document.getElementById("tree-stage");
     const tipFocusRing = document.getElementById("tip-focus-ring");
+    const treeSvg = document.getElementById("tree-svg");
     const defaultTransform = "translate(60, 20) scale(1)";
     const focusScale = 2.35;
     let pinnedTipKey = null;
+    let pinnedTooltipText = null;
 
     function getSvgMetrics() {{
-      const svg = document.getElementById("tree-svg");
-      const rect = svg.getBoundingClientRect();
+      const rect = treeSvg.getBoundingClientRect();
       return {{
         rect,
         scaleX: rect.width / 1120,
@@ -498,6 +502,22 @@ def write_interactive_html(
       }};
     }}
 
+    function tipToClient(tipX, tipY) {{
+      const ctm = treeStage.getScreenCTM();
+      if (!ctm) {{
+        const {{ rect, scaleX, scaleY }} = getSvgMetrics();
+        return {{
+          x: rect.left + tipX * scaleX,
+          y: rect.top + tipY * scaleY,
+        }};
+      }}
+      const pt = treeSvg.createSVGPoint();
+      pt.x = tipX;
+      pt.y = tipY;
+      const screen = pt.matrixTransform(ctm);
+      return {{ x: screen.x, y: screen.y }};
+    }}
+
     function normalizeSearchKey(value) {{
       return String(value || "")
         .trim()
@@ -505,17 +525,41 @@ def write_interactive_html(
         .replace(/[\\s_]+/g, " ");
     }}
 
+    function placeTooltip(clientX, clientY) {{
+      const pad = 12;
+      const offset = 14;
+      tooltip.style.display = "block";
+      const width = tooltip.offsetWidth || 220;
+      const height = tooltip.offsetHeight || 120;
+      let left = clientX + offset;
+      let top = clientY + offset;
+      if (left + width + pad > window.innerWidth) {{
+        left = clientX - width - offset;
+      }}
+      if (top + height + pad > window.innerHeight) {{
+        top = clientY - height - offset;
+      }}
+      left = Math.max(pad, Math.min(left, window.innerWidth - width - pad));
+      top = Math.max(pad, Math.min(top, window.innerHeight - height - pad));
+      tooltip.style.left = `${{left}}px`;
+      tooltip.style.top = `${{top}}px`;
+    }}
+
     function showTooltip(text, clientX, clientY) {{
       tooltip.textContent = text;
-      tooltip.style.display = "block";
-      tooltip.style.left = `${{clientX + 14}}px`;
-      tooltip.style.top = `${{clientY + 14}}px`;
+      placeTooltip(clientX, clientY);
     }}
 
     function hideTooltip() {{
-      if (!pinnedTipKey) {{
-        tooltip.style.display = "none";
+      if (pinnedTipKey && pinnedTooltipText) {{
+        const tip = TIPS.find((item) => item.key === pinnedTipKey);
+        if (tip) {{
+          const screen = tipToClient(tip.x, tip.y);
+          showTooltip(pinnedTooltipText, screen.x, screen.y);
+          return;
+        }}
       }}
+      tooltip.style.display = "none";
     }}
 
     function focusTreeOnTip(tipX, tipY) {{
@@ -542,6 +586,7 @@ def write_interactive_html(
     function resetTreeView() {{
       treeStage.setAttribute("transform", defaultTransform);
       pinnedTipKey = null;
+      pinnedTooltipText = null;
       hideTipFocusRing();
       searchStatus.textContent = "";
       tooltip.style.display = "none";
@@ -571,6 +616,7 @@ def write_interactive_html(
       const tip = resolveTip(query);
       if (!tip) {{
         pinnedTipKey = null;
+        pinnedTooltipText = null;
         hideTipFocusRing();
         tooltip.style.display = "none";
         searchStatus.textContent = "No matching species found.";
@@ -578,13 +624,17 @@ def write_interactive_html(
       }}
 
       pinnedTipKey = tip.key;
+      pinnedTooltipText = tip.tooltip;
       focusTreeOnTip(tip.x, tip.y);
       showTipFocusRing(tip.x, tip.y);
       searchInput.value = tip.label;
       searchStatus.textContent = `Focused on ${{tip.label}}`;
 
-      const center = getScreenCenter();
-      showTooltip(tip.tooltip, center.x, center.y);
+      // Place detail card next to the focused tip, not at page bottom / screen center.
+      requestAnimationFrame(() => {{
+        const screen = tipToClient(tip.x, tip.y);
+        showTooltip(tip.tooltip, screen.x, screen.y);
+      }});
       return true;
     }}
 
@@ -645,10 +695,24 @@ def write_static_pdf(
     sm = ScalarMappable(cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=1))
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, fraction=0.022, pad=0.01)
-    cbar.set_label("Prediction\naccuracy", rotation=0, labelpad=18)
     cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    # Legend title above the colorbar; +4 pt vs previous defaults (title 14→18, legend ~10→14).
+    cbar.ax.set_title(
+        "Prediction\naccuracy",
+        fontsize=14,
+        fontweight="bold",
+        pad=10,
+    )
+    cbar.ax.tick_params(labelsize=14)
+    for tick_label in cbar.ax.get_yticklabels():
+        tick_label.set_fontweight("bold")
 
-    ax.set_title("XGB residual-learning accuracy across test-set species", fontsize=14, pad=18)
+    ax.set_title(
+        "XGB residual-learning accuracy across test-set species",
+        fontsize=18,
+        fontweight="bold",
+        pad=18,
+    )
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_xlim(-500, 500)
