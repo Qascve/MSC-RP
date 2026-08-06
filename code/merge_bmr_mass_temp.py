@@ -580,6 +580,8 @@ def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
     )
     out = out.loc[core_mask].copy()
 
+    # Reference is intentionally excluded so the same observation cited with
+    # different literature strings across source databases can still match.
     dedup_cols = [
         GENUS_COL,
         SPECIES_COL,
@@ -591,7 +593,6 @@ def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
         "BMR_unit",
         "temperature",
         "temperature_unit",
-        "Reference",
     ]
     out = out.drop_duplicates(subset=dedup_cols, keep="first")
     return out
