@@ -1318,7 +1318,7 @@ def save_shap_outputs(
             color="#4C72B0",
         )
         ax.set_xlabel(
-            "mean(|SHAP|) over test observations",
+            "Mean(|SHAP|) over test observations",
             fontsize=LABEL_SIZE,
             fontweight="bold",
         )
@@ -1442,9 +1442,9 @@ def save_shap_outputs(
                 "predicted log10(BMR): positive pushes up, negative pushes down.",
                 "",
                 "Six plots (3 types × random_forest / xgboost):",
-                "- shap_summary_bar_{model}.pdf: fully grouped mean(|SHAP|)",
+                "- shap_summary_bar_{model}.pdf: fully grouped Mean(|SHAP|)",
                 "  (taxonomy_class, phylogeny, mass, temperature)",
-                "- shap_summary_bar_raw_features_{model}.pdf: mean(|SHAP|) with",
+                "- shap_summary_bar_raw_features_{model}.pdf: Mean(|SHAP|) with",
                 "  8 class_* features + phylogeny (PC1–PC5) + mass + temperature",
                 "- shap_summary_beeswarm_{model}.pdf: signed SHAP beeswarm;",
                 "  PC1–PC5 SHAP values are summed into phylogeny (not abs first)",
