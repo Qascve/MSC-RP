@@ -23,7 +23,7 @@ def resolve_path(root: Path, path: Path) -> Path:
 
 
 def fold_accuracy(y_true: pd.Series, y_pred: pd.Series) -> np.ndarray:
-    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
+    # Multiplicative accuracy on log10(BMR): 10^(-|pred - true|).
     y_true_arr = pd.to_numeric(y_true, errors="coerce").to_numpy(dtype=float)
     y_pred_arr = pd.to_numeric(y_pred, errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(y_true_arr) & np.isfinite(y_pred_arr)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train RF/XGB M1–M4 with class-balanced weights; report micro/macro/bal metrics."""
+# Train RF/XGB M1–M4 with class-balanced weights; report micro/macro/bal metrics.
 from __future__ import annotations
 
 import argparse
@@ -166,7 +166,7 @@ CLASS_BALANCED_WEIGHT_FORMULA = (
 
 
 def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
-    """Same class-balanced row weights as ml_residual_learning XGB/RF."""
+    # Same class-balanced row weights as ml_residual_learning XGB/RF.
     classes = train_df[CLADE_COL].to_numpy()
     unique_classes = np.unique(classes)
     class_weights = compute_class_weight(
@@ -196,7 +196,7 @@ def evaluate_weighted(
     y_pred_log: np.ndarray,
     sample_weight: np.ndarray,
 ) -> dict[str, float]:
-    """Class-balanced weighted RMSE/MAE/R2 on log10(BMR)."""
+    # Class-balanced weighted RMSE/MAE/R2 on log10(BMR).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     sw = np.asarray(sample_weight, dtype=float)
@@ -222,7 +222,7 @@ def evaluate_macro_by_class(
     y_pred_log: np.ndarray,
     classes: np.ndarray,
 ) -> dict[str, float]:
-    """Unweighted mean of per-class micro metrics (each class counts equally)."""
+    # Unweighted mean of per-class micro metrics (each class counts equally).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     classes = np.asarray(classes)
@@ -252,7 +252,7 @@ def evaluate_reporting_suite(
     y_pred_log: np.ndarray,
     classes: np.ndarray,
 ) -> dict[str, float]:
-    """Micro, macro, and class-balanced weighted metrics (same as residual learning)."""
+    # Micro, macro, and class-balanced weighted metrics (same as residual learning).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     classes = np.asarray(classes)
@@ -295,7 +295,7 @@ def _cartesian_param_dicts(grid: dict) -> list[dict]:
 
 
 def draw_unique_param_sets(grid: dict, n_trials: int, random_state: int) -> list[dict]:
-    """Randomly draw unique parameter combinations without replacement."""
+    # Randomly draw unique parameter combinations without replacement.
     all_combinations = _cartesian_param_dicts(grid)
     total = len(all_combinations)
     if total == 0:
@@ -320,7 +320,7 @@ def make_xgb_regressor(
     random_state: int,
     early_stopping_rounds: int | None = None,
 ) -> XGBRegressor:
-    """Build XGBRegressor using searched HPs only; remaining args stay at XGBoost defaults."""
+    # Build XGBRegressor using searched HPs only; remaining args stay at XGBoost defaults.
     kwargs: dict = {
         "objective": "reg:squarederror",
         "n_estimators": int(n_estimators),
@@ -421,7 +421,7 @@ def model_key(algo: str, spec: str) -> str:
 
 
 def to_display_model_name(model_name: str) -> str:
-    """Map internal keys like random_forest_m3 -> M3-RF (Table 1 naming)."""
+    # Map internal keys like random_forest_m3 -> M3-RF (Table 1 naming).
     if model_name.startswith("random_forest_"):
         suffix = model_name.replace("random_forest_", "", 1)
         return f"{suffix.upper()}-RF"
@@ -432,7 +432,7 @@ def to_display_model_name(model_name: str) -> str:
 
 
 def load_four_fold_cv_splits(split_dir: Path) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
-    """Load fold1–fold4 species-block CV splits (same protocol as residual learning)."""
+    # Load fold1–fold4 species-block CV splits (same protocol as residual learning).
     found: list[tuple[str, pd.DataFrame, pd.DataFrame]] = []
     for name in CV_FOLD_NAMES:
         train_path = split_dir / name / "train.csv"
@@ -454,7 +454,7 @@ def tune_shared_hyperparams(
     random_state: int,
     n_trials: int,
 ) -> dict:
-    """4-fold species-block HP search on HP_TUNE_SPEC features; shared by all M1–M4."""
+    # 4-fold species-block HP search on HP_TUNE_SPEC features; shared by all M1–M4.
     feature_cols = MODEL_FEATURES[HP_TUNE_SPEC]
     prepared_splits: list[dict] = []
     for fold_tag, fit_df, val_df in cv_splits:
@@ -595,7 +595,7 @@ def tune_shared_hyperparams(
 def train_all_specs(
     train_df: pd.DataFrame, best_params: dict, random_state: int
 ) -> dict:
-    """Fit RF/XGB for every M1–M4 with shared best HPs on full train."""
+    # Fit RF/XGB for every M1–M4 with shared best HPs on full train.
     models: dict[str, object] = {}
     feature_columns: dict[str, list[str]] = {}
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)

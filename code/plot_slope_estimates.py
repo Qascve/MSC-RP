@@ -228,7 +228,7 @@ def evaluate_weighted(
     y_pred_log: np.ndarray,
     sample_weight: np.ndarray,
 ) -> dict[str, float]:
-    """Class-balanced weighted RMSE/MAE/R2 on log10(BMR)."""
+    # Class-balanced weighted RMSE/MAE/R2 on log10(BMR).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     sw = np.asarray(sample_weight, dtype=float)
@@ -254,7 +254,7 @@ def evaluate_macro_by_class(
     y_pred_log: np.ndarray,
     classes: np.ndarray,
 ) -> dict[str, float]:
-    """Unweighted mean of per-class micro metrics (each class counts equally)."""
+    # Unweighted mean of per-class micro metrics (each class counts equally).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     classes = np.asarray(classes)
@@ -284,7 +284,7 @@ def evaluate_reporting_suite(
     y_pred_log: np.ndarray,
     classes: np.ndarray,
 ) -> dict[str, float]:
-    """Micro, macro, and class-balanced weighted metrics (CSV only; plots use micro)."""
+    # Micro, macro, and class-balanced weighted metrics (CSV only; plots use micro).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     classes = np.asarray(classes)
@@ -338,10 +338,10 @@ def predict_m1_m2(
 
 
 def predict_m_mte(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
-    """Fixed-b MTE (M2 with mass slope locked at 3/4).
-
-    Equivalent to: log_BMR ~ inv_kT + offset(0.75 * log_mass)
-    """
+    # Fixed-b MTE (M2 with mass slope locked at 3/4).
+    #
+    # Equivalent to: log_BMR ~ inv_kT + offset(0.75 * log_mass)
+    #
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
     log_mass_train = train_df["log_mass"].to_numpy(dtype=float)
     log_mass_test = test_df["log_mass"].to_numpy(dtype=float)
@@ -378,7 +378,7 @@ def build_ml_residual_metrics(
     explore_ml_predictions_path: Path,
     residual_predictions_path: Path,
 ) -> pd.DataFrame:
-    """M-MTE + M3/M4 RF/XGB + Residual-RF/XGB on the held-out test set."""
+    # M-MTE + M3/M4 RF/XGB + Residual-RF/XGB on the held-out test set.
     y_test = test_df[LOG_TARGET].to_numpy(dtype=float)
     classes = test_df[CLADE_COL].to_numpy()
     pred_mte = predict_m_mte(train_df, test_df)
@@ -487,7 +487,7 @@ def save_ml_residual_comparison_plot(metrics_df: pd.DataFrame, output_path: Path
     save_rmse_r2_comparison_plot(
         metrics_df,
         output_path,
-        title="Machine Learning models VS Prespecified models",
+        title="Performance comparison of Machine Learning models and M-MTE model on test set",
     )
 
 
@@ -496,13 +496,6 @@ def fit_m2_mass_slope(
     inv_kT: np.ndarray,
     log_bmr: np.ndarray,
 ) -> tuple[float, float, float, float, int]:
-    """Temperature-corrected M2 OLS: log10(BMR) ~ 1 + b*log10(mass) + c*inv_kT.
-
-    Returns b, SE(b), intercept, temp_coef, n.
-    If temperature has no within-group variation, inv_kT is collinear with the
-    intercept; the identified mass slope then equals the mass-only slope and
-    temp_coef is reported as NaN.
-    """
     x = np.asarray(log_mass, dtype=float)
     t = np.asarray(inv_kT, dtype=float)
     y = np.asarray(log_bmr, dtype=float)
@@ -552,7 +545,7 @@ def fit_m2_mass_slope(
 
 
 def build_slope_summary(df: pd.DataFrame, min_rows: int) -> pd.DataFrame:
-    """Class/global mass slopes from M2 (mass + temperature), not mass-only M1."""
+    # Class/global mass slopes from M2 (mass + temperature), not mass-only M1.
     required = ["log_mass", "inv_kT", LOG_TARGET]
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -653,20 +646,20 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
             color="#55A868",
             linestyle="--",
             linewidth=1.6,
-            label=f"estimated b = {global_b:.3f}",
+            label=f"Estimated b = {global_b:.3f}",
             zorder=2,
         )
 
         ax.set_yticks(y_pos)
         ax.set_yticklabels(classes, fontsize=TICK_SIZE, fontweight="bold")
         ax.set_xlabel(
-            "temperature-corrected mass-scaling exponent b (M2)",
+            "Exponent b",
             fontsize=LABEL_SIZE,
             fontweight="bold",
         )
-        ax.set_ylabel("Class", fontsize=LABEL_SIZE, fontweight="bold")
+        ax.set_ylabel("Clades", fontsize=LABEL_SIZE, fontweight="bold")
         ax.set_title(
-            "M2 mass-scaling exponent estimates (mass + temperature)",
+             "M2 Exponent b estimates",
             fontsize=TITLE_SIZE,
             fontweight="bold",
         )

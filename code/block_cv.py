@@ -307,7 +307,7 @@ def write_fold_files(
 
 
 def safe_evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
-    """Evaluate on log_BMR only."""
+    # Evaluate on log_BMR only.
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)

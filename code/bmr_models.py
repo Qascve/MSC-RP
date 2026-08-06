@@ -1,52 +1,50 @@
-"""
-BMR scaling models: lm / XGB / RF x m1-m4, evaluated under TWO data
-pipelines and THREE train/test splitting strategies each.
-
-=============================================================================
-PIPELINE A — "avg"  (one row per species, averaged)
-=============================================================================
-Many species have multiple BMR measurements. If individual rows were split
-into train/test, the same species could appear in both, and a model could
-"memorize" a species' intercept rather than generalize. Instead of doing
-row-level splits with group-aware folding, the dataset is first collapsed to
-ONE ROW PER SPECIES: log_mass, log_BMR, and inv_kT are averaged across a
-species' repeated measurements; taxonomy and PCA coordinates are already
-constant within a species. With exactly one row per species, any ordinary
-split is automatically leak-free.
-
-=============================================================================
-PIPELINE B — "nonleaky"  (all rows kept, species-grouped splits)
-=============================================================================
-All rows are kept so a model can learn from within-species replicate
-variation -- but every split strategy assigns a whole SPECIES to a single
-fold, so no species ever appears in both train and test.
-
-=============================================================================
-THE THREE SPLITTING STRATEGIES (all 5-fold, species-level)
-=============================================================================
-Density and clustering are both computed directly on the TREE's patristic
-(cophenetic) distance matrix -- the actual phylogenetic distance -- rather
-than on the PCA embedding space, which is only an approximation of it.
-
-1. RANDOM     - species randomly shuffled into 5 folds. Baseline.
-2. DENSITY    - Gaussian-kernel density from patristic distances
-                (bandwidth = median pairwise distance). Fold 0 = rarest /
-                most phylogenetically isolated species.
-3. CLUSTERING - Ward hierarchical clustering on the condensed patristic
-                distance matrix; each cluster = one fold (entire clade held
-                out). Hardest / most extrapolative split.
-
-=============================================================================
-THE FOUR MODELS
-=============================================================================
-m1: log_BMR ~ log_mass
-m2: log_BMR ~ log_mass + inv_kT
-m3: log_BMR ~ (log_mass + inv_kT) * clade        [clade = taxonomic class]
-m4: log_BMR ~ (log_mass + inv_kT) * phylogeny    [phylogeny = 5 PCA axes]
-
-Each is fit with three algorithms (LinearRegression, XGBRegressor,
-RandomForestRegressor) on the SAME design matrix.
-"""
+# BMR scaling models: lm / XGB / RF x m1-m4, evaluated under TWO data
+# pipelines and THREE train/test splitting strategies each.
+#
+# =============================================================================
+# PIPELINE A — "avg"  (one row per species, averaged)
+# =============================================================================
+# Many species have multiple BMR measurements. If individual rows were split
+# into train/test, the same species could appear in both, and a model could
+# "memorize" a species' intercept rather than generalize. Instead of doing
+# row-level splits with group-aware folding, the dataset is first collapsed to
+# ONE ROW PER SPECIES: log_mass, log_BMR, and inv_kT are averaged across a
+# species' repeated measurements; taxonomy and PCA coordinates are already
+# constant within a species. With exactly one row per species, any ordinary
+# split is automatically leak-free.
+#
+# =============================================================================
+# PIPELINE B — "nonleaky"  (all rows kept, species-grouped splits)
+# =============================================================================
+# All rows are kept so a model can learn from within-species replicate
+# variation -- but every split strategy assigns a whole SPECIES to a single
+# fold, so no species ever appears in both train and test.
+#
+# =============================================================================
+# THE THREE SPLITTING STRATEGIES (all 5-fold, species-level)
+# =============================================================================
+# Density and clustering are both computed directly on the TREE's patristic
+# (cophenetic) distance matrix -- the actual phylogenetic distance -- rather
+# than on the PCA embedding space, which is only an approximation of it.
+#
+# 1. RANDOM     - species randomly shuffled into 5 folds. Baseline.
+# 2. DENSITY    - Gaussian-kernel density from patristic distances
+# (bandwidth = median pairwise distance). Fold 0 = rarest /
+# most phylogenetically isolated species.
+# 3. CLUSTERING - Ward hierarchical clustering on the condensed patristic
+# distance matrix; each cluster = one fold (entire clade held
+# out). Hardest / most extrapolative split.
+#
+# =============================================================================
+# THE FOUR MODELS
+# =============================================================================
+# m1: log_BMR ~ log_mass
+# m2: log_BMR ~ log_mass + inv_kT
+# m3: log_BMR ~ (log_mass + inv_kT) * clade        [clade = taxonomic class]
+# m4: log_BMR ~ (log_mass + inv_kT) * phylogeny    [phylogeny = 5 PCA axes]
+#
+# Each is fit with three algorithms (LinearRegression, XGBRegressor,
+# RandomForestRegressor) on the SAME design matrix.
 
 import itertools
 import numpy as np
@@ -70,15 +68,14 @@ BOLTZMANN_EV = 8.617333262e-5  # eV / K
 # =============================================================================
 
 def load_data(trait_path, embed_path):
-    """
-    Returns
-    -------
-    df_full : pd.DataFrame
-        One row per BMR measurement (used by the nonleaky pipeline).
-    df_avg  : pd.DataFrame
-        One row per species, numeric columns averaged (used by the avg pipeline).
-    pc_cols : list[str]
-    """
+    #     Returns
+    # -------
+    # df_full : pd.DataFrame
+    #     One row per BMR measurement (used by the nonleaky pipeline).
+    # df_avg  : pd.DataFrame
+    #     One row per species, numeric columns averaged (used by the avg pipeline).
+    # pc_cols : list[str]
+    #
     traits = pd.read_csv(trait_path)
     embed  = pd.read_csv(embed_path).drop_duplicates(subset="taxon_name")
 
@@ -112,8 +109,8 @@ def load_data(trait_path, embed_path):
 # =============================================================================
 
 def build_distance_matrix(tree_path, taxon_names):
-    """Patristic (cophenetic) distance matrix between `taxon_names`, in that
-    exact order, read off the phylogenetic tree."""
+    # Patristic (cophenetic) distance matrix between `taxon_names`, in that
+    # exact order, read off the phylogenetic tree.
     tree = dendropy.Tree.get(path=tree_path, schema="newick")
     pdm  = tree.phylogenetic_distance_matrix()
     label_to_taxon = {t.label: t for t in tree.taxon_namespace}
@@ -295,19 +292,18 @@ def evaluate(df, pc_cols, fold_map, model_name, algo_name, params):
 # =============================================================================
 
 def run_pipeline(pipeline_name, df, taxon_names, dist_matrix, pc_cols):
-    """
-    Parameters
-    ----------
-    pipeline_name : "avg" | "nonleaky"
-    df            : the dataframe for this pipeline (df_avg or df_full)
-    taxon_names   : ordered list of species names matching dist_matrix rows
-    dist_matrix   : pre-built patristic distance matrix
-    pc_cols       : list of PC column names
-
-    Returns
-    -------
-    list of result dicts, each tagged with pipeline=pipeline_name
-    """
+    #     Parameters
+    # ----------
+    # pipeline_name : "avg" | "nonleaky"
+    # df            : the dataframe for this pipeline (df_avg or df_full)
+    # taxon_names   : ordered list of species names matching dist_matrix rows
+    # dist_matrix   : pre-built patristic distance matrix
+    # pc_cols       : list of PC column names
+    #
+    # Returns
+    # -------
+    # list of result dicts, each tagged with pipeline=pipeline_name
+    #
     results = []
     for split_name, split_fn in SPLIT_STRATEGIES.items():
         fold_map = split_fn(taxon_names, dist_matrix)

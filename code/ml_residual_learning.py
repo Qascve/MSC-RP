@@ -9,6 +9,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -99,6 +100,30 @@ XGB_PARAM_GRID = {
     "learning_rate": [0.01, 0.02, 0.03],
 }
 
+TITLE_SIZE = 14
+LABEL_SIZE = 12
+TICK_SIZE = 12
+LEGEND_SIZE = 12
+
+
+def apply_bold_fonts(ax: Axes, *, title_size: int = TITLE_SIZE) -> None:
+    ax.set_title(ax.get_title(), fontsize=title_size, fontweight="bold")
+    ax.set_xlabel(ax.get_xlabel(), fontsize=LABEL_SIZE, fontweight="bold")
+    ax.set_ylabel(ax.get_ylabel(), fontsize=LABEL_SIZE, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontsize(TICK_SIZE)
+        label.set_fontweight("bold")
+    legend = ax.get_legend()
+    if legend is not None:
+        for text in legend.get_texts():
+            text.set_fontsize(LEGEND_SIZE)
+            text.set_fontweight("bold")
+        title = legend.get_title()
+        if title is not None and title.get_text():
+            title.set_fontsize(LEGEND_SIZE)
+            title.set_fontweight("bold")
+
 
 def find_root(marker: str = ".gitignore") -> Path:
     for start in [Path.cwd(), Path(__file__).resolve().parent]:
@@ -110,7 +135,7 @@ def find_root(marker: str = ".gitignore") -> Path:
 
 
 def _assert_log10_target_columns(df: pd.DataFrame, path: Path) -> None:
-    """Reject stale split CSVs that still store natural-log targets."""
+    # Reject stale split CSVs that still store natural-log targets.
     if LOG_TARGET not in df.columns or TARGET not in df.columns:
         return
     csv_log = pd.to_numeric(df[LOG_TARGET], errors="coerce").to_numpy(dtype=float)
@@ -172,10 +197,7 @@ def load_split_data(path: Path) -> pd.DataFrame:
 
 
 def discover_fold_splits(split_dir: Path, folds: list[str] | None = None) -> list[tuple[str, Path, Path]]:
-    """
-    Discover fixed fold CSVs under split_dir.
-    Prefers fold1/, fold2/, test/; falls back to top-level train.csv/test.csv as fold1.
-    """
+
     wanted = folds if folds else ["fold1", "fold2", "fold3", "fold4", "test"]
     found: list[tuple[str, Path, Path]] = []
     for name in wanted:
@@ -208,7 +230,7 @@ def assert_no_species_leakage(train_df: pd.DataFrame, test_df: pd.DataFrame) -> 
 
 
 def fit_m3_baseline(train_df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-    """Fit M3-L: log10(BMR) ~ log_mass + inv_kT + class (additive OLS)."""
+    # Fit M3-L: log10(BMR) ~ log_mass + inv_kT + class (additive OLS).
     clade_levels = sorted(train_df[CLADE_COL].dropna().astype(str).unique().tolist())
     if not clade_levels:
         raise ValueError("No class levels available to fit the M3-L baseline.")
@@ -268,7 +290,7 @@ def _cartesian_param_dicts(grid: dict) -> list[dict]:
 
 
 def draw_unique_param_sets(grid: dict, n_trials: int, random_state: int) -> list[dict]:
-    """Randomly draw unique parameter combinations without replacement."""
+    # Randomly draw unique parameter combinations without replacement.
     all_combinations = _cartesian_param_dicts(grid)
     total = len(all_combinations)
     if total == 0:
@@ -294,7 +316,7 @@ def make_xgb_regressor(
     random_state: int,
     early_stopping_rounds: int | None = None,
 ) -> XGBRegressor:
-    """Build XGBRegressor using searched HPs only; remaining args stay at XGBoost defaults."""
+    # Build XGBRegressor using searched HPs only; remaining args stay at XGBoost defaults.
     kwargs: dict = {
         "objective": "reg:squarederror",
         "n_estimators": int(n_estimators),
@@ -315,7 +337,7 @@ def encode_train_frame(
     m3_clade_levels: list[str],
     feature_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-    """Encode residual features for one frame; optionally align to saved columns."""
+    # Encode residual features for one frame; optionally align to saved columns.
     cat = [c for c in TREE_MODEL_FEATURES if c in TAXONOMY_MODEL_FEATURES]
     raw = df[TREE_MODEL_FEATURES].reset_index(drop=True).copy()
     encoded = pd.get_dummies(raw, columns=cat, prefix=cat, dtype=float)
@@ -335,7 +357,7 @@ def fit_rf_with_early_stopping(
     sample_weight: np.ndarray | None,
     random_state: int,
 ) -> tuple[RandomForestRegressor, int, float]:
-    """Grow RF in batches and stop when validation RMSE stops improving."""
+    # Grow RF in batches and stop when validation RMSE stops improving.
     best_rmse = np.inf
     best_n = RF_TREE_BATCH
     patience_left = max(1, EARLY_STOPPING_ROUNDS // RF_TREE_BATCH)
@@ -417,13 +439,7 @@ def tune_models_on_train(
     balance_classes: bool,
     n_hp_trials: int,
 ) -> dict:
-    """
-    Tune RF/XGB by fixed four-fold species-block CV with early stopping, then
-    retrain both on the complete 80% development set.
 
-    Each CV M3-L baseline is fitted only on that fold's three training
-    partitions. Validation targets therefore never contribute to the baseline.
-    """
     if len(cv_splits) != 4:
         raise ValueError(f"Expected exactly four CV splits, got {len(cv_splits)}.")
 
@@ -667,7 +683,7 @@ def tune_models_on_train(
 
 
 def save_model_bundle(bundle: dict, model_dir: Path) -> Path:
-    """Save RF and XGB separately for this fold."""
+    # Save RF and XGB separately for this fold.
     model_dir.mkdir(parents=True, exist_ok=True)
     for obsolete in ("model.joblib",):
         path = model_dir / obsolete
@@ -716,13 +732,7 @@ def write_hp_search_trials_csv(
     bundle: dict,
     model_dir: Path | None = None,
 ) -> Path:
-    """
-    Write/append all sampled RF/XGB combinations + four-fold CV RMSE.
 
-    Fixed filenames are overwritten on every run. If a CSV is open and locked
-    on Windows, write an ``*_unlocked.csv`` fallback and continue instead of
-    losing the completed search.
-    """
     def write_with_fallback(df: pd.DataFrame, path: Path) -> Path:
         try:
             df.to_csv(path, index=False, encoding="utf-8")
@@ -771,7 +781,7 @@ def write_hp_search_trials_csv(
 
 
 def load_model_bundle(model_dir: Path) -> dict:
-    """Load both separately persisted model families from one fold."""
+    # Load both separately persisted model families from one fold.
     meta_path = model_dir / "meta.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"Missing model meta: {meta_path}")
@@ -802,7 +812,7 @@ def load_model_bundle(model_dir: Path) -> dict:
 def predict_log_bmr(
     bundle: dict, df: pd.DataFrame
 ) -> tuple[dict[str, np.ndarray], dict[str, pd.DataFrame]]:
-    """Predict log10(BMR) with a loaded bundle; also return residual feature frames for SHAP."""
+    # Predict log10(BMR) with a loaded bundle; also return residual feature frames for SHAP.
     m3_coef = bundle["m3_coef"]
     m3_clade_levels = bundle["m3_clade_levels"]
     feature_columns = bundle["feature_columns"]
@@ -823,7 +833,7 @@ def predict_log_bmr(
 
 
 def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
-    """Micro-averaged metrics on pooled log10(BMR) observations."""
+    # Micro-averaged metrics on pooled log10(BMR) observations.
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
     y_true_log = np.asarray(y_true_log, dtype=float)[mask]
     y_pred_log = np.asarray(y_pred_log, dtype=float)[mask]
@@ -904,10 +914,7 @@ def evaluate_reporting_suite(
     y_pred_log: np.ndarray,
     classes: np.ndarray | None = None,
 ) -> dict[str, float]:
-    """
-    Micro (pooled), macro (equal class average), and class-balanced weighted metrics.
-    Residual RF/XGB are trained with the same balanced weights.
-    """
+
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     micro = evaluate(y_true_log, y_pred_log)
@@ -950,7 +957,7 @@ def evaluate_reporting_suite(
 
 
 def save_loss_curve_from_bundle(model_dir: Path, out_dir: Path) -> None:
-    """Copy/plot the XGB early-stopping validation loss curve."""
+    # Copy/plot the XGB early-stopping validation loss curve.
     src = model_dir / "loss_curve.csv"
     if not src.exists():
         # Backward compatibility
@@ -963,20 +970,26 @@ def save_loss_curve_from_bundle(model_dir: Path, out_dir: Path) -> None:
     lc_df = pd.read_csv(src)
     lc_df.to_csv(out_dir / "loss_curve_data.csv", index=False, encoding="utf-8")
     sns.set_theme(style="whitegrid")
-    plt.figure(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(9, 6))
     ycol = "val_rmse" if "val_rmse" in lc_df.columns else lc_df.columns[-1]
-    plt.plot(lc_df["iteration"], lc_df[ycol], label="val_rmse", linewidth=2)
-    plt.xlabel("XGB boosting iteration")
-    plt.ylabel("RMSE (log10(BMR) residual)")
-    plt.title("XGBoost Early-Stopping Validation Loss")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_dir / "loss_curve.pdf", bbox_inches="tight")
-    plt.close()
+    ax.plot(lc_df["iteration"], lc_df[ycol], label="val_rmse", linewidth=2)
+    ax.set_xlabel("XGB boosting iteration", fontsize=LABEL_SIZE, fontweight="bold")
+    ax.set_ylabel("RMSE (log10(BMR) residual)", fontsize=LABEL_SIZE, fontweight="bold")
+    ax.set_title(
+        "XGBoost Early-Stopping Validation Loss",
+        fontsize=TITLE_SIZE,
+        fontweight="bold",
+    )
+    ax.legend(fontsize=LEGEND_SIZE, prop={"weight": "bold", "size": LEGEND_SIZE})
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+    apply_bold_fonts(ax)
+    fig.tight_layout()
+    fig.savefig(out_dir / "loss_curve.pdf", bbox_inches="tight")
+    plt.close(fig)
 
 
 def prediction_model_cols(pred_df: pd.DataFrame) -> list[str]:
-    """Model prediction columns present in a prediction frame."""
+    # Model prediction columns present in a prediction frame.
     cols = [c for c in MODEL_NAMES if c in pred_df.columns]
     if cols:
         return cols
@@ -992,8 +1005,8 @@ def save_pred_and_residual_plots(
     model_names = model_names or prediction_model_cols(pred_df)
 
     for model in model_names:
-        plt.figure(figsize=(8, 7))
-        plt.scatter(
+        fig, ax = plt.subplots(figsize=(8, 7))
+        ax.scatter(
             pred_df["y_true"],
             pred_df[model],
             s=14,
@@ -1003,27 +1016,42 @@ def save_pred_and_residual_plots(
         )
         min_v = float(min(pred_df["y_true"].min(), pred_df[model].min()))
         max_v = float(max(pred_df["y_true"].max(), pred_df[model].max()))
-        plt.plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1)
-        plt.xlabel("Observed log10(BMR)")
-        plt.ylabel("Predicted log10(BMR)")
-        plt.title(f"Observed vs Predicted log10(BMR) ({model})")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(out_dir / f"observed_vs_predicted_scatter_{model}.pdf", bbox_inches="tight")
-        plt.close()
+        ax.plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1)
+        ax.set_xlabel("Observed log10(BMR)", fontsize=LABEL_SIZE, fontweight="bold")
+        ax.set_ylabel("Predicted log10(BMR)", fontsize=LABEL_SIZE, fontweight="bold")
+        ax.set_title(
+            f"Observed vs Predicted log10(BMR) ({model})",
+            fontsize=TITLE_SIZE,
+            fontweight="bold",
+        )
+        ax.legend(fontsize=LEGEND_SIZE, prop={"weight": "bold", "size": LEGEND_SIZE})
+        ax.tick_params(axis="both", labelsize=TICK_SIZE)
+        apply_bold_fonts(ax)
+        fig.tight_layout()
+        fig.savefig(
+            out_dir / f"observed_vs_predicted_scatter_{model}.pdf",
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
-    plt.figure(figsize=(8, 7))
+    fig, ax = plt.subplots(figsize=(8, 7))
     for model in model_names:
         residual = pred_df["y_true"] - pred_df[model]
-        plt.scatter(pred_df[model], residual, s=14, alpha=0.45, label=model)
-    plt.axhline(0.0, color="k", linestyle="--", linewidth=1)
-    plt.xlabel("Predicted log10(BMR)")
-    plt.ylabel("Residual (log Observed - log Predicted)")
-    plt.title("Residual Plot (log10(BMR))")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_dir / "residual_plot.pdf", bbox_inches="tight")
-    plt.close()
+        ax.scatter(pred_df[model], residual, s=14, alpha=0.45, label=model)
+    ax.axhline(0.0, color="k", linestyle="--", linewidth=1)
+    ax.set_xlabel("Predicted log10(BMR)", fontsize=LABEL_SIZE, fontweight="bold")
+    ax.set_ylabel(
+        "Residual (log Observed - log Predicted)",
+        fontsize=LABEL_SIZE,
+        fontweight="bold",
+    )
+    ax.set_title("Residual Plot (log10(BMR))", fontsize=TITLE_SIZE, fontweight="bold")
+    ax.legend(fontsize=LEGEND_SIZE, prop={"weight": "bold", "size": LEGEND_SIZE})
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+    apply_bold_fonts(ax)
+    fig.tight_layout()
+    fig.savefig(out_dir / "residual_plot.pdf", bbox_inches="tight")
+    plt.close(fig)
 
 
 def save_performance_boxplot(
@@ -1054,29 +1082,35 @@ def save_performance_boxplot(
     perf_df.to_csv(out_dir / "performance_boxplot_data.csv", index=False, encoding="utf-8")
 
     sns.set_theme(style="whitegrid")
-    plt.figure(figsize=(9, 6))
-    sns.boxplot(data=perf_df, x="model", y="rmse")
-    plt.xlabel("Model")
-    plt.ylabel("Bootstrap RMSE (log10(BMR))")
-    plt.title("Model Performance Boxplot (log10(BMR))")
-    plt.tight_layout()
-    plt.savefig(out_dir / "model_performance_boxplot.pdf", bbox_inches="tight")
-    plt.close()
+    fig, ax = plt.subplots(figsize=(9, 6))
+    sns.boxplot(data=perf_df, x="model", y="rmse", ax=ax)
+    ax.set_xlabel("Model", fontsize=LABEL_SIZE, fontweight="bold")
+    ax.set_ylabel("Bootstrap RMSE (log10(BMR))", fontsize=LABEL_SIZE, fontweight="bold")
+    ax.set_title(
+        "Model Performance Boxplot (log10(BMR))",
+        fontsize=TITLE_SIZE,
+        fontweight="bold",
+    )
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
+    apply_bold_fonts(ax)
+    fig.tight_layout()
+    fig.savefig(out_dir / "model_performance_boxplot.pdf", bbox_inches="tight")
+    plt.close(fig)
     return perf_df
 
 
 def _shap_feature_group(feature_name: str) -> str:
-    """Map raw design columns into fully pooled reporting groups (bar.pdf)."""
+    # Map raw design columns into fully pooled reporting groups (bar.pdf).
     name = str(feature_name)
     lower = name.lower()
     if lower.startswith("class_") or name == "class":
-        return "taxonomy_class"
+        return "Taxonomy Groups"
     if lower.startswith("pc") and lower[2:].isdigit():
-        return "phylogeny"
+        return "Phylogeny"
     if name == "log_mass":
-        return "mass"
+        return "Mass"
     if name == "inv_kT":
-        return "temperature"
+        return "Temperature"
     return name
 
 
@@ -1085,15 +1119,26 @@ def _is_pc_feature(feature_name: str) -> bool:
     return lower.startswith("pc") and lower[2:].isdigit()
 
 
+def _display_group_label(group_name: str) -> str:
+    # Y-axis labels for grouped SHAP bar: capitalize first letter.
+    name = str(group_name)
+    if not name:
+        return name
+    return name[0].upper() + name[1:]
+
+
 def _display_feature_label(feature_name: str) -> str:
-    """Labels for beeswarm / raw-feature bar (PC pooled; mass/temperature renamed)."""
+    # Labels for beeswarm / raw-feature bar (PC pooled; mass/temperature renamed).
     name = str(feature_name)
     if name == "log_mass":
-        return "mass"
+        return "Mass"
     if name == "inv_kT":
-        return "temperature"
+        return "Temperature"
     if _is_pc_feature(name):
-        return "phylogeny"
+        return "Phylogeny"
+    lower = name.lower()
+    if lower.startswith("class_"):
+        return name[6:]  # drop "class_" / "Class_" prefix
     return name
 
 
@@ -1102,10 +1147,8 @@ def _mean_abs_shap_by_group(
     feature_names: list[str],
     row_mask: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    """
-    For each observation, sum |SHAP| within a feature group, then average over
-    observations. Positive/negative direction is ignored by the abs step.
-    """
+    # For each observation, sum |SHAP| within a feature group, then average over
+    # observations. Positive/negative direction is ignored by the abs step.
     values = np.asarray(shap_values, dtype=float)
     if row_mask is not None:
         values = values[row_mask]
@@ -1134,13 +1177,7 @@ def _build_pc_merged_shap_frame(
     shap_values: np.ndarray,
     X: pd.DataFrame,
 ) -> tuple[np.ndarray, pd.DataFrame, list[str]]:
-    """
-    Merge PC1–PC5 into one phylogeny column for beeswarm / raw-feature displays.
 
-    Beeswarm uses signed sum of PC SHAP values (direction preserved).
-    Feature value for phylogeny coloring is the sum of PC feature values.
-    Class dummies stay separate; log_mass→mass, inv_kT→temperature.
-    """
     feature_names = list(X.columns)
     shap_values = np.asarray(shap_values, dtype=float)
     pc_idxs = [i for i, name in enumerate(feature_names) if _is_pc_feature(name)]
@@ -1157,7 +1194,7 @@ def _build_pc_merged_shap_frame(
         value_cols.append(X.iloc[:, i].to_numpy(dtype=float))
 
     if pc_idxs:
-        labels.append("phylogeny")
+        labels.append("Phylogeny")
         shap_cols.append(shap_values[:, pc_idxs].sum(axis=1))
         value_cols.append(X.iloc[:, pc_idxs].to_numpy(dtype=float).sum(axis=1))
 
@@ -1173,10 +1210,7 @@ def _raw_feature_mean_abs_importance(
     shap_values: np.ndarray,
     feature_names: list[str],
 ) -> pd.DataFrame:
-    """
-    mean(|SHAP|) with PC1–PC5 pooled as phylogeny, classes kept separate,
-    log_mass→mass, inv_kT→temperature.
-    """
+
     shap_values = np.asarray(shap_values, dtype=float)
     abs_vals = np.abs(shap_values)
     rows: list[dict[str, object]] = []
@@ -1196,7 +1230,7 @@ def _raw_feature_mean_abs_importance(
         per_row = abs_vals[:, pc_idxs].sum(axis=1)
         rows.append(
             {
-                "feature": "phylogeny",
+                "feature": "Phylogeny",
                 "mean_abs_shap": float(np.mean(per_row)),
             }
         )
@@ -1210,20 +1244,6 @@ def save_shap_outputs(
     shap_inputs: dict[str, pd.DataFrame],
     class_labels: np.ndarray | pd.Series | None = None,
 ) -> None:
-    """
-    Write SHAP CSVs/plots for residual RF and XGB on the evaluation rows.
-
-    Three plot types × two models (random_forest / xgboost):
-    - shap_summary_bar_{model}.pdf: fully grouped mean(|SHAP|)
-      (taxonomy_class / phylogeny / mass / temperature)
-    - shap_summary_bar_raw_features_{model}.pdf: mean(|SHAP|) with 8 class_*
-      kept separate + phylogeny (PC1–5) + mass + temperature
-    - shap_summary_beeswarm_{model}.pdf: signed SHAP, PC1–5 summed into phylogeny
-    """
-    def save_current_figure(path: Path) -> None:
-        fig = plt.gcf()
-        fig.savefig(path, bbox_inches="tight")
-        plt.close(fig)
 
     model_names = [name for name in MODEL_NAMES if name in models and name in shap_inputs]
     if not model_names:
@@ -1290,30 +1310,107 @@ def save_shap_outputs(
                 all_by_class_frames.append(class_grouped)
 
         # 1) Grouped bar
-        plt.figure(figsize=(9, 6))
+        fig, ax = plt.subplots(figsize=(9, 6))
         plot_df = grouped_df.sort_values("mean_abs_shap", ascending=True)
-        plt.barh(plot_df["feature_group"], plot_df["mean_abs_shap"], color="#4C72B0")
-        plt.xlabel("mean(|SHAP|) over test observations")
-        plt.title(f"Grouped SHAP importance ({model_name})")
-        plt.tight_layout()
-        save_current_figure(out_dir / f"shap_summary_bar_{model_name}.pdf")
+        ax.barh(
+            plot_df["feature_group"].map(_display_group_label),
+            plot_df["mean_abs_shap"],
+            color="#4C72B0",
+        )
+        ax.set_xlabel(
+            "mean(|SHAP|) over test observations",
+            fontsize=LABEL_SIZE,
+            fontweight="bold",
+        )
+        ax.set_title(
+            f"Grouped SHAP importance ({model_name})",
+            fontsize=TITLE_SIZE,
+            fontweight="bold",
+        )
+        ax.tick_params(axis="both", labelsize=TICK_SIZE)
+        apply_bold_fonts(ax)
+        fig.tight_layout()
+        fig.savefig(out_dir / f"shap_summary_bar_{model_name}.pdf", bbox_inches="tight")
+        plt.close(fig)
 
         # 2) Raw bar: 8 classes + phylogeny + mass + temperature
-        plt.figure(figsize=(9, max(6.0, 0.35 * len(raw_imp) + 2.0)))
+        fig, ax = plt.subplots(figsize=(9, max(6.0, 0.35 * len(raw_imp) + 2.0)))
         plot_raw = raw_imp.sort_values("mean_abs_shap", ascending=True)
-        plt.barh(plot_raw["feature"], plot_raw["mean_abs_shap"], color="#4C72B0")
-        plt.xlabel("mean(|SHAP|) over test observations")
-        plt.title(f"SHAP feature importance ({model_name})")
-        plt.tight_layout()
-        save_current_figure(out_dir / f"shap_summary_bar_raw_features_{model_name}.pdf")
+        ax.barh(plot_raw["feature"], plot_raw["mean_abs_shap"], color="#4C72B0")
+        ax.set_xlabel(
+            "Mean(|SHAP|) over test observations",
+            fontsize=LABEL_SIZE,
+            fontweight="bold",
+        )
+        ax.set_title(
+            (
+                "SHAP Feature Importance (Random Forest)"
+                if model_name == "random_forest"
+                else "SHAP Feature Importance (XGBoost)"
+            ),
+            fontsize=TITLE_SIZE,
+            fontweight="bold",
+        )
+        ax.tick_params(axis="both", labelsize=TICK_SIZE)
+        apply_bold_fonts(ax)
+        fig.tight_layout()
+        fig.savefig(
+            out_dir / f"shap_summary_bar_raw_features_{model_name}.pdf",
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
-        # 3) Beeswarm: signed SHAP; PC1–PC5 summed into phylogeny
+        # 3) Beeswarm: signed SHAP; PC1–PC5 summed into phylogeny.
+        # Use shap.plots.beeswarm (returns Axes when show=False). Legacy
+        # shap.summary_plot is often typed as NoReturn via plt.show().
         shap_merged, X_merged, _ = _build_pc_merged_shap_frame(shap_values, X_test_res)
-        plt.figure(figsize=(10, 7))
-        shap.summary_plot(shap_merged, X_merged, show=False)
-        plt.title(f"SHAP beeswarm ({model_name})")
-        plt.tight_layout()
-        save_current_figure(out_dir / f"shap_summary_beeswarm_{model_name}.pdf")
+        explanation = shap.Explanation(
+            values=shap_merged,
+            data=X_merged.to_numpy(dtype=float),
+            feature_names=list(X_merged.columns),
+        )
+        ax = shap.plots.beeswarm(
+            explanation,
+            show=False,
+            plot_size=(10, 7),
+            max_display=explanation.values.shape[1],
+        )
+        ax.set_title(
+            (
+                "SHAP Beeswarm (Random Forest)"
+                if model_name == "random_forest"
+                else "SHAP Beeswarm (XGBoost)"
+            ),
+            fontsize=TITLE_SIZE,
+            fontweight="bold",
+        )
+        ax.set_xlabel(
+            "SHAP value",
+            fontsize=LABEL_SIZE,
+            fontweight="bold",
+        )
+        ax.tick_params(axis="both", labelsize=TICK_SIZE)
+        apply_bold_fonts(ax)
+        fig = ax.figure
+        for cax in fig.axes:
+            if cax is ax:
+                continue
+            cax.tick_params(axis="both", labelsize=TICK_SIZE)
+            for label in cax.get_xticklabels() + cax.get_yticklabels():
+                label.set_fontsize(TICK_SIZE)
+                label.set_fontweight("bold")
+            if cax.get_ylabel():
+                cax.set_ylabel(
+                    "Feature value",
+                    fontsize=LABEL_SIZE,
+                    fontweight="bold",
+                )
+        fig.tight_layout()
+        fig.savefig(
+            out_dir / f"shap_summary_beeswarm_{model_name}.pdf",
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
         print(f"  SHAP ({model_name}): wrote plots under {out_dir}", flush=True)
 
@@ -1359,7 +1456,7 @@ def save_shap_outputs(
 
 
 def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
-    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
+    # Multiplicative accuracy on log10(BMR): 10^(-|pred - true|).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     out = np.full(len(y_true_log), np.nan, dtype=float)
@@ -1372,7 +1469,7 @@ def build_species_accuracy_table(
     pred_df: pd.DataFrame,
     model_cols: list[str],
 ) -> pd.DataFrame:
-    """One row per taxon_name; columns are per-model mean accuracy across rows."""
+    # One row per taxon_name; columns are per-model mean accuracy across rows.
     work = pred_df.copy()
     work["taxon_name"] = work["taxon_name"].astype("string").str.strip()
     y_true = pd.to_numeric(work["y_true"], errors="coerce").to_numpy(dtype=float)
@@ -1389,9 +1486,8 @@ def build_species_accuracy_table(
 
 
 def write_group_species_accuracy(group_dir: Path, fold_tags: list[str]) -> Path:
-    """
-    Stitch fold/test predictions and write RF/XGB species-level accuracy.
-    """
+    #     Stitch fold/test predictions and write RF/XGB species-level accuracy.
+    #
     frames: list[pd.DataFrame] = []
     for tag in fold_tags:
         pred_path = group_dir / tag / "benchmark_predictions_test.csv"
@@ -1432,7 +1528,7 @@ def write_group_eval_from_predictions(
     random_state: int,
     write_models_copy: bool,
 ) -> pd.DataFrame:
-    """Write RF and XGB metrics/plots for a class subset."""
+    # Write RF and XGB metrics/plots for a class subset.
     out_dir.mkdir(parents=True, exist_ok=True)
     mask = group_test_df.index.to_numpy()
     pred_df = pred_df_all.loc[mask].reset_index(drop=True)
@@ -1522,7 +1618,7 @@ def fit_fixed_rf(
     sample_weight: np.ndarray | None,
     random_state: int,
 ) -> RandomForestRegressor:
-    """Fit RF with a fixed hyperparameter set (no early stopping)."""
+    # Fit RF with a fixed hyperparameter set (no early stopping).
     rf = RandomForestRegressor(
         n_estimators=int(params["n_estimators"]),
         max_depth=int(params["max_depth"]),
@@ -1545,7 +1641,7 @@ def fit_fixed_xgb(
     sample_weight: np.ndarray | None,
     random_state: int,
 ) -> XGBRegressor:
-    """Fit XGB with a fixed hyperparameter set (no early stopping)."""
+    # Fit XGB with a fixed hyperparameter set (no early stopping).
     xgb = make_xgb_regressor(
         n_estimators=int(params["n_estimators"]),
         learning_rate=float(params["learning_rate"]),
@@ -1565,10 +1661,9 @@ def run_oof_cv_predictions(
     random_state: int,
     balance_classes: bool,
 ) -> pd.DataFrame:
-    """
-    Re-run four-fold CV with the selected hyperparameter set and collect
-    out-of-fold log10(BMR) predictions for RF and XGB.
-    """
+    #     Re-run four-fold CV with the selected hyperparameter set and collect
+    # out-of-fold log10(BMR) predictions for RF and XGB.
+    #
     xgb_params = best_params["xgboost"]
     rf_params = best_params["random_forest"]
     prediction_columns = list(
@@ -1626,9 +1721,8 @@ def run_oof_cv_predictions(
 
 
 def save_cv_oof_outputs(out_dir: Path, oof_df: pd.DataFrame) -> list[str]:
-    """
-    Write OOF prediction/metric CSVs under <group>/cv/ for all and class subsets.
-    """
+    #     Write OOF prediction/metric CSVs under <group>/cv/ for all and class subsets.
+    #
     groups_done: list[str] = []
     oof_reset = oof_df.reset_index(drop=True)
     for group_name, class_name in GROUP_CLASS_FILTERS.items():
@@ -1695,7 +1789,7 @@ def evaluate_fold_predictions(
     model_dir: Path,
     random_state: int,
 ) -> list[str]:
-    """Write all / class-group eval outputs for RF and XGB."""
+    # Write all / class-group eval outputs for RF and XGB.
     missing = [name for name in MODEL_NAMES if name not in preds]
     if missing:
         raise KeyError(f"Missing predictions for: {missing}")
@@ -1745,11 +1839,10 @@ def run_four_fold_cv_global(
     balance_classes: bool,
     n_hp_trials: int,
 ) -> list[str]:
-    """
-    Select XGB parameters by four-fold CV, retrain both models on all four
-    development folds, save/reload them, evaluate once on held-out test, and
-    write OOF CV predictions under <group>/cv/ using the selected HPs.
-    """
+    #     Select XGB parameters by four-fold CV, retrain both models on all four
+    # development folds, save/reload them, evaluate once on held-out test, and
+    # write OOF CV predictions under <group>/cv/ using the selected HPs.
+    #
     fold_tag = "test"
     model_dir = out_dir / "all" / fold_tag / "models"
 

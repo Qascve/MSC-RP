@@ -53,7 +53,7 @@ def drop_classes_below_min_species(
     *,
     min_species: int = 7,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Drop classes with fewer than `min_species` unique taxon_name values."""
+    # Drop classes with fewer than `min_species` unique taxon_name values.
     out = df.copy()
     if "class" not in out.columns:
         raise KeyError("Merged frame missing required column: class")

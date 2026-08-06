@@ -43,7 +43,7 @@ def taxon_to_tip_label(taxon_name: str) -> str:
 
 
 def fold_accuracy(y_true: pd.Series, y_pred: pd.Series) -> np.ndarray:
-    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
+    # Multiplicative accuracy on log10(BMR): 10^(-|pred - true|).
     y_true_arr = pd.to_numeric(y_true, errors="coerce").to_numpy(dtype=float)
     y_pred_arr = pd.to_numeric(y_pred, errors="coerce").to_numpy(dtype=float)
     valid = np.isfinite(y_true_arr) & np.isfinite(y_pred_arr)
@@ -379,7 +379,7 @@ def write_interactive_html(
     .search-bar button:hover {{
       background: #ececec;
     }}
-    #search-status {{
+    # search-status {{
       width: 100%;
       text-align: center;
       font-size: 13px;
@@ -409,7 +409,7 @@ def write_interactive_html(
       pointer-events: none;
       visibility: hidden;
     }}
-    #tooltip {{
+    # tooltip {{
       position: fixed;
       display: none;
       pointer-events: none;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate PPT-ready summary assets for the current fixed-split dataset."""
+# Generate PPT-ready summary assets for the current fixed-split dataset.
 
 from __future__ import annotations
 

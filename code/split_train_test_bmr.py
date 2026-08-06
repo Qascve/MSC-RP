@@ -1,28 +1,26 @@
 #!/usr/bin/env python3
-"""
-Create a fixed species-blocked 4-fold development partition plus held-out test.
-
-This is a species-blocked holdout design (plus reusable development folds), not
-a claim that the single 20% test bucket alone is "cross-validation".
-
-Per taxonomic class, each species (taxon_name) is assigned wholly to one of:
-  F1, F2, F3, F4, T (target ~20% each).
-
-Stratification details:
-  - Within each class, species are shuffled (seeded) then placed into buckets
-    with per-class quotas from _allocate_counts.
-  - Remainder slots prefer currently lightest buckets (by global row totals).
-  - Classes with n_species < 5 cannot appear in every bucket; some folds/test
-    may lack that class. With n_species >= 5, all five buckets receive >=1 species.
-
-Fold usage:
-  Fold i (HP/CV): train = other three development folds (~60%), eval = Fi (~20%)
-  Test holdout:   train = F1∪F2∪F3∪F4 (~80%), eval = T (~20%)
-
-Also writes class_weights.csv with row shares. Training sample weights used by
-residual RF/XGB and explore M3-L/M4-L follow sklearn balanced:
-  w_c = n / (n_classes * n_c).
-"""
+# Create a fixed species-blocked 4-fold development partition plus held-out test.
+#
+# This is a species-blocked holdout design (plus reusable development folds), not
+# a claim that the single 20% test bucket alone is "cross-validation".
+#
+# Per taxonomic class, each species (taxon_name) is assigned wholly to one of:
+# F1, F2, F3, F4, T (target ~20% each).
+#
+# Stratification details:
+# - Within each class, species are shuffled (seeded) then placed into buckets
+# with per-class quotas from _allocate_counts.
+# - Remainder slots prefer currently lightest buckets (by global row totals).
+# - Classes with n_species < 5 cannot appear in every bucket; some folds/test
+# may lack that class. With n_species >= 5, all five buckets receive >=1 species.
+#
+# Fold usage:
+# Fold i (HP/CV): train = other three development folds (~60%), eval = Fi (~20%)
+# Test holdout:   train = F1∪F2∪F3∪F4 (~80%), eval = T (~20%)
+#
+# Also writes class_weights.csv with row shares. Training sample weights used by
+# residual RF/XGB and explore M3-L/M4-L follow sklearn balanced:
+# w_c = n / (n_classes * n_c).
 
 from __future__ import annotations
 
@@ -110,7 +108,7 @@ def prepare_modeling_frame(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _allocate_counts(n: int, n_buckets: int = 5) -> list[int]:
-    """Allocate species as evenly as possible across fixed buckets."""
+    # Allocate species as evenly as possible across fixed buckets.
     if n < 1:
         raise ValueError("Need at least one species.")
     base, remainder = divmod(n, n_buckets)
@@ -124,10 +122,9 @@ def assign_species_to_buckets(
     df: pd.DataFrame,
     random_state: int,
 ) -> tuple[list[set[str]], set[str], pd.DataFrame]:
-    """
-    Per class, assign each species wholly to F1/F2/F3/F4/T.
-    Returns (four development-fold species sets, test species set, summary).
-    """
+    #     Per class, assign each species wholly to F1/F2/F3/F4/T.
+    # Returns (four development-fold species sets, test species set, summary).
+    #
     rng = np.random.default_rng(random_state)
     cv_folds: list[set[str]] = [set() for _ in range(4)]
     holdout: set[str] = set()

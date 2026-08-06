@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
-"""
-Merge three source datasets into one CSV with unified columns.
-
-Sources:
-- data/raw/pnas.2303764120.sd01.xlsx
-- data/raw/observations.xlsx
-- data/raw/41586_2010_BFnature08920_MOESM90_ESM.xls
-
-Keep every observation row that simultaneously has:
-Genus, species, temperature, and BMR.
-No per-species record-count limit is applied.
-
-Output columns (fixed order):
-- class
-- order
-- family
-- Genus
-- species
-- wet_Mass_kg
-- BMR
-- BMR_unit
-- temperature
-- temperature_unit
-- Reference
-
-Mass is standardized to kg. Metabolic rate is kept only when reported in W
-(no kJ/h, kJ/s, mW/kW, or other unit conversions). PNAS rows are restricted
-to Type of Metabolic Rate == Basal; AnimalTraits rows are restricted to
-metabolic rate - method == "basal metabolic rate". Genus/species are kept
-as parsed from source binomials without renaming.
-"""
+# Merge three source datasets into one CSV with unified columns.
+#
+# Sources:
+# - data/raw/pnas.2303764120.sd01.xlsx
+# - data/raw/observations.xlsx
+# - data/raw/41586_2010_BFnature08920_MOESM90_ESM.xls
+#
+# Keep every observation row that simultaneously has:
+# Genus, species, temperature, and BMR.
+# No per-species record-count limit is applied.
+#
+# Output columns (fixed order):
+# - class
+# - order
+# - family
+# - Genus
+# - species
+# - wet_Mass_kg
+# - BMR
+# - BMR_unit
+# - temperature
+# - temperature_unit
+# - Reference
+#
+# Mass is standardized to kg. Metabolic rate is kept only when reported in W
+# (no kJ/h, kJ/s, mW/kW, or other unit conversions). PNAS rows are restricted
+# to Type of Metabolic Rate == Basal; AnimalTraits rows are restricted to
+# metabolic rate - method == "basal metabolic rate". Genus/species are kept
+# as parsed from source binomials without renaming.
 
 from __future__ import annotations
 import argparse
@@ -63,14 +61,13 @@ OUTPUT_COLS = [
 
 
 def find_root(start: Optional[Path] = None, marker: str = ".gitignore") -> Path:
-    """
-    Find project root by walking up directories until `marker` is found.
-
-    Priority:
-    1) caller-provided `start`
-    2) current working directory
-    3) this script location
-    """
+    #     Find project root by walking up directories until `marker` is found.
+    #
+    # Priority:
+    # 1) caller-provided `start`
+    # 2) current working directory
+    # 3) this script location
+    #
     anchors = [start] if start is not None else [Path.cwd(), Path(__file__).resolve().parent]
 
     checked = set()
@@ -92,7 +89,7 @@ def find_root(start: Optional[Path] = None, marker: str = ".gitignore") -> Path:
 
 
 def detect_header_row(path: Path, sheet_name: Optional[str] = None, max_rows: int = 50) -> int:
-    """Heuristically detect the most likely header row for Excel files."""
+    # Heuristically detect the most likely header row for Excel files.
     raw = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=max_rows)
     best_idx = 0
     best_score = (-1, -1)
@@ -109,7 +106,7 @@ def detect_header_row(path: Path, sheet_name: Optional[str] = None, max_rows: in
 
 
 def dedupe_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Make duplicate column names unique by appending suffixes."""
+    # Make duplicate column names unique by appending suffixes.
     cols = []
     seen = {}
     for col in df.columns:
@@ -152,11 +149,10 @@ def make_output_frame(length: int) -> pd.DataFrame:
 
 
 def ensure_weight_pair(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Auto-calculate wet mass g/wet mass kg if one side is missing.
-    kg = g / 1000
-    g  = kg * 1000
-    """
+    #     Auto-calculate wet mass g/wet mass kg if one side is missing.
+    # kg = g / 1000
+    # g  = kg * 1000
+    #
     out = df.copy()
     g = numeric(out[WET_G_COL])
     kg = numeric(out[WET_KG_COL])
@@ -192,12 +188,11 @@ def normalize_bmr_unit(unit: object) -> str:
 def convert_bmr_value_unit_to_w(
     bmr_value: pd.Series, bmr_unit: pd.Series
 ) -> tuple[pd.Series, pd.Series]:
-    """
-    Keep metabolic rate only when the reported unit is watts (W).
-
-    No conversion from mW/kW, J/s, kJ/h, kJ/s, O2 volume rates, or other
-    energy/time units: non-W units are treated as missing.
-    """
+    #     Keep metabolic rate only when the reported unit is watts (W).
+    #
+    # No conversion from mW/kW, J/s, kJ/h, kJ/s, O2 volume rates, or other
+    # energy/time units: non-W units are treated as missing.
+    #
     value = numeric(bmr_value)
     unit = bmr_unit.map(normalize_bmr_unit)
     is_w = unit.isin(["w", "watt", "watts"])
@@ -212,10 +207,9 @@ def convert_bmr_value_unit_to_w(
 
 
 def parse_temperature_series(series: pd.Series) -> pd.Series:
-    """
-    Parse numeric temperatures and simple ranges (e.g. '25-35', '4-20C') to midpoint.
-    Non-numeric placeholders such as ENDO/ND become NaN.
-    """
+    #     Parse numeric temperatures and simple ranges (e.g. '25-35', '4-20C') to midpoint.
+    # Non-numeric placeholders such as ENDO/ND become NaN.
+    #
     values: list[float] = []
     for raw in series.tolist():
         text = normalize_text_value(raw)
@@ -289,13 +283,12 @@ def mass_from_candidates(
     df: pd.DataFrame,
     candidates: list[tuple[str, Optional[str], Optional[str]]],
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """
-    Convert mass from candidate (value_col, unit_col, default_unit) triples.
-    Returns:
-      - wet mass in g
-      - wet mass in kg
-      - raw mass fallback values (for rows still unresolved)
-    """
+    #     Convert mass from candidate (value_col, unit_col, default_unit) triples.
+    # Returns:
+    #   - wet mass in g
+    #   - wet mass in kg
+    #   - raw mass fallback values (for rows still unresolved)
+    #
     n = len(df)
     out_g = pd.Series([np.nan] * n)
     out_kg = pd.Series([np.nan] * n)
@@ -332,12 +325,11 @@ def mass_from_candidates(
 
 
 def build_general_mass_candidates(df: pd.DataFrame) -> list[tuple[str, Optional[str], Optional[str]]]:
-    """
-    Build flexible mass candidates for current and future datasets.
-    Priority:
-      1) explicit common columns
-      2) any mass-like column + matched unit column
-    """
+    #     Build flexible mass candidates for current and future datasets.
+    # Priority:
+    #   1) explicit common columns
+    #   2) any mass-like column + matched unit column
+    #
     candidates: list[tuple[str, Optional[str], Optional[str]]] = []
     explicit = [
         ("Wet Mass (g)", None, "g"),
@@ -544,7 +536,7 @@ def clean_text_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 
 
 def is_valid_taxon_token(series: pd.Series, *, allow_numeric: bool = False) -> pd.Series:
-    """Reject blank / placeholder genus-species tokens such as NA, unknown, or bare numbers."""
+    # Reject blank / placeholder genus-species tokens such as NA, unknown, or bare numbers.
     text = series.astype("string").str.strip()
     lower = text.str.lower()
     invalid = {
@@ -570,12 +562,11 @@ def is_valid_taxon_token(series: pd.Series, *, allow_numeric: bool = False) -> p
 
 
 def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    1) Keep rows that simultaneously have Genus, species, temperature, and BMR.
-       Also require wet_Mass_kg so body mass can be retained in kg.
-       No per-species record-count limit is applied.
-    2) Remove exact-duplicate biologically-equivalent records.
-    """
+    #     1) Keep rows that simultaneously have Genus, species, temperature, and BMR.
+    #    Also require wet_Mass_kg so body mass can be retained in kg.
+    #    No per-species record-count limit is applied.
+    # 2) Remove exact-duplicate biologically-equivalent records.
+    #
     out = df.copy()
 
     core_mask = (
@@ -607,7 +598,7 @@ def drop_incomplete_core_and_deduplicate(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def unique_classes_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Summarize unique class values after merge (Genus/species unchanged)."""
+    # Summarize unique class values after merge (Genus/species unchanged).
     out = df.copy()
     out["class"] = out["class"].astype("string").str.strip().replace(
         {"": pd.NA, "nan": pd.NA, "NaN": pd.NA}

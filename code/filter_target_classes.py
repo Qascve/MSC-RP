@@ -161,11 +161,10 @@ def drop_classes_below_min_species(
     min_species: int = 7,
     species_col: str | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Drop classes with fewer than `min_species` unique species.
-
-    Species are counted by `taxon_name` when present, otherwise by Genus+species.
-    """
+    #     Drop classes with fewer than `min_species` unique species.
+    #
+    # Species are counted by `taxon_name` when present, otherwise by Genus+species.
+    #
     out = df.copy()
     if species_col is None:
         if "taxon_name" in out.columns:
@@ -191,7 +190,7 @@ def drop_classes_below_min_species(
 
 
 def ensure_wet_mass_g(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive wet_Mass_g from wet_Mass_kg when only kg is present (merged schema)."""
+    # Derive wet_Mass_g from wet_Mass_kg when only kg is present (merged schema).
     out = df.copy()
     if "wet_Mass_kg" in out.columns:
         kg = pd.to_numeric(out["wet_Mass_kg"], errors="coerce")

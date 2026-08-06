@@ -52,7 +52,7 @@ def run_python_dependency(
     extra_args: list[str],
     label: str,
 ) -> None:
-    """Run a required pipeline script with visible output and fail fast."""
+    # Run a required pipeline script with visible output and fail fast.
     cmd = [sys.executable, str(script_path), *extra_args]
     print(f"\n[{label}] Missing or stale results; running dependency...", flush=True)
     completed = subprocess.run(cmd, cwd=root, check=False)
@@ -93,7 +93,7 @@ def add_mte_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def make_class_balanced_sample_weight(train_df: pd.DataFrame) -> np.ndarray:
-    """Same class-balanced row weights as ml_residual_learning XGB/RF."""
+    # Same class-balanced row weights as ml_residual_learning XGB/RF.
     classes = train_df[CLADE_COL].to_numpy()
     unique_classes = np.unique(classes)
     class_weights = compute_class_weight(
@@ -110,7 +110,7 @@ def fit_ols(
     y: np.ndarray,
     sample_weight: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Ordinary or weighted least squares (WLS via row scaling)."""
+    # Ordinary or weighted least squares (WLS via row scaling).
     if sample_weight is None:
         coef, *_ = np.linalg.lstsq(X, y, rcond=None)
         return coef
@@ -156,10 +156,9 @@ def build_design_m3(df: pd.DataFrame, clade_levels: list[str]) -> tuple[np.ndarr
 
 
 def build_design_m4(df: pd.DataFrame, pc_cols: list[str] | None = None) -> tuple[np.ndarray, list[str]]:
-    """
-    M4 linear design: log_BMR ~ log_mass + inv_kT + PC axes + interactions
-    (log_mass * PC, inv_kT * PC), matching bmr_models.py m4 with algo=lm.
-    """
+    #     M4 linear design: log_BMR ~ log_mass + inv_kT + PC axes + interactions
+    # (log_mass * PC, inv_kT * PC), matching bmr_models.py m4 with algo=lm.
+    #
     pc_cols = pc_cols or PHYLO_PC_COLS
     x_log_mass = df["log_mass"].to_numpy(dtype=float)
     x_inv_kT = df["inv_kT"].to_numpy(dtype=float)
@@ -183,7 +182,7 @@ def build_design_m4(df: pd.DataFrame, pc_cols: list[str] | None = None) -> tuple
 
 
 def evaluate(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> dict[str, float]:
-    """Micro-averaged metrics on pooled log10(BMR) observations."""
+    # Micro-averaged metrics on pooled log10(BMR) observations.
     mask = np.isfinite(y_true_log) & np.isfinite(y_pred_log)
     y_true_log = np.asarray(y_true_log, dtype=float)[mask]
     y_pred_log = np.asarray(y_pred_log, dtype=float)[mask]
@@ -207,7 +206,7 @@ def evaluate_weighted(
     y_pred_log: np.ndarray,
     sample_weight: np.ndarray,
 ) -> dict[str, float]:
-    """Class-balanced weighted RMSE/MAE/R2 on log10(BMR)."""
+    # Class-balanced weighted RMSE/MAE/R2 on log10(BMR).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     sw = np.asarray(sample_weight, dtype=float)
@@ -233,7 +232,7 @@ def evaluate_macro_by_class(
     y_pred_log: np.ndarray,
     classes: np.ndarray,
 ) -> dict[str, float]:
-    """Unweighted mean of per-class micro metrics (each class counts equally)."""
+    # Unweighted mean of per-class micro metrics (each class counts equally).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     classes = np.asarray(classes)
@@ -263,10 +262,9 @@ def evaluate_reporting_suite(
     y_pred_log: np.ndarray,
     classes: np.ndarray,
 ) -> dict[str, float]:
-    """
-    Report micro (pooled), macro (per-class then equal-average), and
-    class-balanced weighted metrics using the same w_c formula as training.
-    """
+    #     Report micro (pooled), macro (per-class then equal-average), and
+    # class-balanced weighted metrics using the same w_c formula as training.
+    #
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     classes = np.asarray(classes)
@@ -370,7 +368,7 @@ def load_benchmark_predictions(path: Path, eval_df: pd.DataFrame, split_label: s
 
 
 def _residual_model_columns(pred_df: pd.DataFrame) -> list[str]:
-    """Accept fold-best single model or legacy dual RF/XGB columns."""
+    # Accept fold-best single model or legacy dual RF/XGB columns.
     cols = [c for c in ("random_forest", "xgboost") if c in pred_df.columns]
     if cols:
         return cols
@@ -657,7 +655,7 @@ def _build_model_metrics(
 
 
 def write_evaluation_protocol_note(out_dir: Path) -> Path:
-    """Document split terminology and class-balanced weight / metric definitions."""
+    # Document split terminology and class-balanced weight / metric definitions.
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "evaluation_protocol.txt"
     text = "\n".join(
@@ -825,7 +823,7 @@ def run_models(
 
 
 def split_linear_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """Rows for linear/phylo M-MTE and M1–M4 only (exclude explore_ml + residual)."""
+    # Rows for linear/phylo M-MTE and M1–M4 only (exclude explore_ml + residual).
     if "model_key" in metrics_df.columns:
         mask = metrics_df["model_key"].isin(LINEAR_MODEL_KEYS)
         out = metrics_df.loc[mask].drop(columns=["model_key"], errors="ignore")
@@ -836,7 +834,7 @@ def split_linear_metrics(metrics_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def write_metrics_by_fold(out_dir: Path, fold_tags: list[str]) -> Path:
-    """Wide summary: one row per model, RMSE/MAE/R2 columns per fold."""
+    # Wide summary: one row per model, RMSE/MAE/R2 columns per fold.
     frames = []
     for tag in fold_tags:
         path = out_dir / tag / "explore_metrics.csv"
@@ -898,7 +896,7 @@ def _is_linear_model(name: str) -> bool:
 
 
 def select_model_performance_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """Keep every evaluated model; sort by RMSE ascending. No filtering."""
+    # Keep every evaluated model; sort by RMSE ascending. No filtering.
     work = metrics_df.copy()
     if "model" not in work.columns:
         raise KeyError("metrics_df requires a model column")
@@ -907,7 +905,7 @@ def select_model_performance_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def select_best_ml_rows(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    """Backward-compatible alias for model performance plotting."""
+    # Backward-compatible alias for model performance plotting.
     return select_model_performance_rows(metrics_df)
 
 
@@ -957,7 +955,7 @@ def save_top5_plus_residual_learning_plot(
     fold_tag: str | None = None,
     top_n: int = 5,
 ) -> tuple[Path, Path]:
-    """Plot the top-N models by RMSE among all evaluated models."""
+    # Plot the top-N models by RMSE among all evaluated models.
     plot_df = select_model_performance_rows(metrics_df).head(top_n).copy()
     keep_cols = [c for c in ("model", "rmse", "mae", "r2") if c in plot_df.columns]
     plot_df = plot_df[keep_cols].reset_index(drop=True)
@@ -1059,7 +1057,7 @@ def save_explore_predictions(
 
 
 def log_bmr_accuracy(y_true_log: np.ndarray, y_pred_log: np.ndarray) -> np.ndarray:
-    """Multiplicative accuracy on log10(BMR): 10^(-|pred - true|)."""
+    # Multiplicative accuracy on log10(BMR): 10^(-|pred - true|).
     y_true_log = np.asarray(y_true_log, dtype=float)
     y_pred_log = np.asarray(y_pred_log, dtype=float)
     out = np.full(len(y_true_log), np.nan, dtype=float)
