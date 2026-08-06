@@ -1,8 +1,8 @@
+Cephalopoda              3/3     100.0%
 Teleostei               15/45     33.3%
-Cephalopoda              1/3      33.3%
-Malacostraca             3/10     30.0%
 Amphibia                 7/24     29.2%
-Insecta                  6/26     23.1%
-Reptilia                 2/23      8.7%
-Aves                     5/63      7.9%
-Mammalia                 6/123     4.9%
+Insecta                  7/26     26.9%
+Reptilia                 3/23     13.0%
+Malacostraca             1/10     10.0%
+Aves                     3/63      4.8%
+Mammalia                 3/123     2.4%
