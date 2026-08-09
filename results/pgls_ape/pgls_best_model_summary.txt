@@ -1,8 +1,8 @@
 Generalized least squares fit by maximum likelihood
   Model: formula 
   Data: train 
-       AIC       BIC   logLik
-  -21582.1 -21562.38 10795.05
+        AIC       BIC   logLik
+  -28611.21 -28591.33 14309.61
 
 Correlation Structure: corBrownian
  Formula: ~Species 
@@ -10,19 +10,19 @@ Correlation Structure: corBrownian
 numeric(0)
 
 Coefficients:
-                Value Std.Error  t-value p-value
-(Intercept)  4.103656 1.3494558  3.04097  0.0024
-log_mass     0.788063 0.0117761 66.92053  0.0000
-inv_kT      -0.146688 0.0337522 -4.34603  0.0000
+                Value Std.Error   t-value p-value
+(Intercept)  7.093045 0.6254294  11.34108       0
+log_mass     0.714045 0.0121883  58.58424       0
+inv_kT      -0.182871 0.0147599 -12.38970       0
 
  Correlation: 
          (Intr) lg_mss
-log_mass  0.089       
-inv_kT   -0.978 -0.051
+log_mass  0.161       
+inv_kT   -0.977 -0.111
 
 Standardized residuals:
-       Min         Q1        Med         Q3        Max 
--3.9469765  0.1430869  1.2048588  2.8358074  7.3260870 
+        Min          Q1         Med          Q3         Max 
+-10.4802157  -1.5189396   0.5679463   1.2377648   4.7480696 
 
-Residual standard error: 0.7904115 
-Degrees of freedom: 1022 total; 1019 residual
+Residual standard error: 0.36927 
+Degrees of freedom: 1065 total; 1062 residual

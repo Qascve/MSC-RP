@@ -1,13 +1,23 @@
 PGLS model comparison
 Formula: log_BMR ~ log_mass + inv_kT
+Train CSV: D:/MSC-RP/data/splits/train.csv
+Test CSV: D:/MSC-RP/data/splits/test/test.csv
+Tree: D:/MSC-RP/data/phylogeny/unique_taxon_names.nwk
 Best model: pglsModel_Brownian
-Best AIC: -21582.095874
-Pagel lambda residual test start value: 0.949633
-BMR test RMSE: 2.167080
-BMR test R2: 0.059634
-log_BMR test RMSE: 1.623634
-log_BMR test R2: 0.710532
-Bad branch count: 63
-Train rows used: 1022
-Train species used: 532
-Test rows predicted: 1464
+Best AIC: -28611.213406
+Pagel lambda residual test start value: 0.932106
+log10(BMR) test RMSE: 0.695566
+log10(BMR) test MAE: 0.589398
+log10(BMR) test R2: 0.786264
+log10(BMR) test RMSE_macro: 0.857869
+log10(BMR) test MAE_macro: 0.769700
+log10(BMR) test R2_macro: -0.127443
+log10(BMR) test RMSE_bal: 0.884458
+log10(BMR) test MAE_bal: 0.769700
+log10(BMR) test R2_bal: 0.718906
+n_classes_eval: 8
+Bad branch count: 86
+Train rows used: 1065
+Train species used: 601
+Test rows predicted: 1014
+Test species: 317

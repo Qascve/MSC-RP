@@ -49,9 +49,11 @@ parse_args <- function(args) {
     args[[idx + 1]]
   }
 
+  # Defaults match the current species-block split used by residual learning /
+  # explore: development train (~80%) and held-out test (~20%).
   list(
-    train = get_value("--train", "data/splits/fold1/train.csv"),
-    test = get_value("--test", "data/splits/fold1/test.csv"),
+    train = get_value("--train", "data/splits/train.csv"),
+    test = get_value("--test", "data/splits/test/test.csv"),
     tree = get_value("--tree", "data/phylogeny/unique_taxon_names.nwk"),
     out_dir = get_value("--out-dir", "results/pgls_ape"),
     formula = get_value("--formula", "log_BMR ~ log_mass + inv_kT")
@@ -94,11 +96,30 @@ clean_observations <- function(path) {
     stop("No valid rows left after cleaning: ", path, call. = FALSE)
   }
 
+  # Prefer columns already prepared by the Python split pipeline when present.
   k_boltzmann_ev_per_k <- 8.617e-5
   df$temp_K <- df$temperature + 273.15
-  df$inv_kT <- 1 / (k_boltzmann_ev_per_k * df$temp_K)
-  df$log_mass <- log10(df$wet_Mass_kg)
-  df$log_BMR <- log10(df$BMR)
+  if ("inv_kT" %in% names(df)) {
+    df$inv_kT <- suppressWarnings(as.numeric(df$inv_kT))
+  }
+  if ("log_mass" %in% names(df)) {
+    df$log_mass <- suppressWarnings(as.numeric(df$log_mass))
+  }
+  if ("log_BMR" %in% names(df)) {
+    df$log_BMR <- suppressWarnings(as.numeric(df$log_BMR))
+  }
+  need_inv <- is.na(df$inv_kT) | !is.finite(df$inv_kT)
+  need_mass <- is.na(df$log_mass) | !is.finite(df$log_mass)
+  need_bmr <- is.na(df$log_BMR) | !is.finite(df$log_BMR)
+  if (any(need_inv) || !"inv_kT" %in% names(df)) {
+    df$inv_kT <- 1 / (k_boltzmann_ev_per_k * df$temp_K)
+  }
+  if (any(need_mass) || !"log_mass" %in% names(df)) {
+    df$log_mass <- log10(df$wet_Mass_kg)
+  }
+  if (any(need_bmr) || !"log_BMR" %in% names(df)) {
+    df$log_BMR <- log10(df$BMR)
+  }
   row.names(df) <- NULL
   df
 }
@@ -161,6 +182,70 @@ metrics <- function(observed, predicted) {
     rmse = sqrt(mean(residual^2)),
     mae = mean(abs(residual)),
     r2 = ifelse(denom > 0, 1 - sum(residual^2) / denom, NA_real_)
+  )
+}
+
+# Match explore.py / ml_residual_learning.py reporting suite:
+# micro (pooled), macro (equal class average), bal (sklearn balanced weights).
+metrics_reporting_suite <- function(observed, predicted, classes) {
+  ok <- is.finite(observed) & is.finite(predicted)
+  observed <- observed[ok]
+  predicted <- predicted[ok]
+  classes <- as.character(classes[ok])
+  micro <- metrics(observed, predicted)
+
+  class_levels <- sort(unique(classes))
+  n_classes <- length(class_levels)
+  if (n_classes == 0) {
+    return(data.frame(
+      n = micro$n,
+      rmse = micro$rmse,
+      mae = micro$mae,
+      r2 = micro$r2,
+      rmse_macro = NA_real_,
+      mae_macro = NA_real_,
+      r2_macro = NA_real_,
+      n_classes_eval = 0L,
+      rmse_bal = NA_real_,
+      mae_bal = NA_real_,
+      r2_bal = NA_real_
+    ))
+  }
+
+  per_class <- lapply(class_levels, function(cls) {
+    metrics(observed[classes == cls], predicted[classes == cls])
+  })
+  rmse_macro <- mean(vapply(per_class, function(x) x$rmse, numeric(1)), na.rm = TRUE)
+  mae_macro <- mean(vapply(per_class, function(x) x$mae, numeric(1)), na.rm = TRUE)
+  r2_vals <- vapply(per_class, function(x) x$r2, numeric(1))
+  r2_macro <- if (all(is.na(r2_vals))) NA_real_ else mean(r2_vals, na.rm = TRUE)
+
+  # w_c = n / (n_classes * n_c), same as sklearn class_weight="balanced".
+  counts <- as.numeric(table(factor(classes, levels = class_levels)))
+  names(counts) <- class_levels
+  weight_map <- length(classes) / (n_classes * counts)
+  sw <- as.numeric(weight_map[classes])
+  resid <- observed - predicted
+  w_sum <- sum(sw)
+  rmse_bal <- sqrt(sum(sw * resid^2) / w_sum)
+  mae_bal <- sum(sw * abs(resid)) / w_sum
+  y_bar <- sum(sw * observed) / w_sum
+  ss_tot <- sum(sw * (observed - y_bar)^2)
+  ss_res <- sum(sw * resid^2)
+  r2_bal <- if (ss_tot > 0) 1 - ss_res / ss_tot else NA_real_
+
+  data.frame(
+    n = micro$n,
+    rmse = micro$rmse,
+    mae = micro$mae,
+    r2 = micro$r2,
+    rmse_macro = as.numeric(rmse_macro),
+    mae_macro = as.numeric(mae_macro),
+    r2_macro = as.numeric(r2_macro),
+    n_classes_eval = as.integer(n_classes),
+    rmse_bal = as.numeric(rmse_bal),
+    mae_bal = as.numeric(mae_bal),
+    r2_bal = as.numeric(r2_bal)
   )
 }
 
@@ -343,32 +428,62 @@ main <- function() {
   train_phylo$y_fitted_log_BMR <- as.numeric(stats::fitted(best_fit))
   train_phylo$residual_log_BMR <- stats::residuals(best_fit, type = "response")
 
-  test_metrics_log <- metrics(test$log_BMR, test$y_pred_log_BMR)
-  metric_out <- data.frame(scale = "log10_BMR", test_metrics_log)
+  if (!("class" %in% names(test))) {
+    stop("Test CSV must include a class column for macro/bal metrics.", call. = FALSE)
+  }
+  test_metrics_log <- metrics_reporting_suite(
+    test$log_BMR,
+    test$y_pred_log_BMR,
+    test$class
+  )
+  metric_out <- data.frame(
+    model = paste0("M4-", gsub("^pglsModel_", "", best_model_name)),
+    scale = "log10_BMR",
+    train_class_weighted = 0L,
+    test_metrics_log,
+    row.names = NULL
+  )
+
+  test_dir <- file.path(out_dir, "test")
+  dir.create(test_dir, recursive = TRUE, showWarnings = FALSE)
 
   aic_table$delta_AIC <- aic_table$AIC - min(aic_table$AIC, na.rm = TRUE)
   aic_table <- aic_table[order(aic_table$AIC), , drop = FALSE]
   write.csv(aic_table, file.path(out_dir, "pgls_aic_scores.csv"), row.names = FALSE)
   test_out <- test[, setdiff(names(test), c("BMR", "BMR_unit")), drop = FALSE]
   train_out <- train_phylo[, setdiff(names(train_phylo), c("BMR", "BMR_unit")), drop = FALSE]
-  write.csv(test_out, file.path(out_dir, "pgls_test_predictions.csv"), row.names = FALSE)
+  write.csv(test_out, file.path(test_dir, "pgls_test_predictions.csv"), row.names = FALSE)
   write.csv(train_out, file.path(out_dir, "pgls_train_fitted.csv"), row.names = FALSE)
+  write.csv(metric_out, file.path(test_dir, "pgls_test_metrics.csv"), row.names = FALSE)
+  # Keep legacy top-level copies for existing explore.py loaders.
+  write.csv(test_out, file.path(out_dir, "pgls_test_predictions.csv"), row.names = FALSE)
   write.csv(metric_out, file.path(out_dir, "pgls_test_metrics.csv"), row.names = FALSE)
   writeLines(capture.output(summary(best_fit)), file.path(out_dir, "pgls_best_model_summary.txt"))
   writeLines(
     c(
       "PGLS model comparison",
       sprintf("Formula: %s", args$formula),
+      sprintf("Train CSV: %s", train_path),
+      sprintf("Test CSV: %s", test_path),
+      sprintf("Tree: %s", tree_path),
       sprintf("Best model: %s", best_model_name),
       sprintf("Best AIC: %.6f", ok_aic$AIC[[1]]),
       sprintf("Pagel lambda residual test start value: %.6f", lambda_signal$lambda),
       sprintf("log10(BMR) test RMSE: %.6f", test_metrics_log$rmse),
       sprintf("log10(BMR) test MAE: %.6f", test_metrics_log$mae),
       sprintf("log10(BMR) test R2: %.6f", test_metrics_log$r2),
+      sprintf("log10(BMR) test RMSE_macro: %.6f", test_metrics_log$rmse_macro),
+      sprintf("log10(BMR) test MAE_macro: %.6f", test_metrics_log$mae_macro),
+      sprintf("log10(BMR) test R2_macro: %.6f", test_metrics_log$r2_macro),
+      sprintf("log10(BMR) test RMSE_bal: %.6f", test_metrics_log$rmse_bal),
+      sprintf("log10(BMR) test MAE_bal: %.6f", test_metrics_log$mae_bal),
+      sprintf("log10(BMR) test R2_bal: %.6f", test_metrics_log$r2_bal),
+      sprintf("n_classes_eval: %d", test_metrics_log$n_classes_eval),
       sprintf("Bad branch count: %d", bad_branch_filter$bad_edge_count),
       sprintf("Train rows used: %d", nrow(train_phylo)),
       sprintf("Train species used: %d", length(unique(train_phylo$Species))),
-      sprintf("Test rows predicted: %d", nrow(test))
+      sprintf("Test rows predicted: %d", nrow(test)),
+      sprintf("Test species: %d", length(unique(test$Species)))
     ),
     file.path(out_dir, "pgls_metrics_summary.txt")
   )
@@ -377,8 +492,11 @@ main <- function() {
   cat("  Best model:", best_model_name, "\n")
   cat("  Best AIC:", sprintf("%.6f", ok_aic$AIC[[1]]), "\n")
   cat("  Test RMSE (log10(BMR)):", sprintf("%.6f", test_metrics_log$rmse), "\n")
+  cat("  Test RMSE_macro:", sprintf("%.6f", test_metrics_log$rmse_macro), "\n")
+  cat("  Test RMSE_bal:", sprintf("%.6f", test_metrics_log$rmse_bal), "\n")
   cat("  Test R2 (log10(BMR)):", sprintf("%.6f", test_metrics_log$r2), "\n")
   cat("  Output directory:", out_dir, "\n")
+  cat("  Test metrics:", file.path(test_dir, "pgls_test_metrics.csv"), "\n")
 }
 
 main()
