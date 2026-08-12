@@ -153,6 +153,18 @@ def build_design_m4(df: pd.DataFrame, pc_cols: list[str] | None = None) -> np.nd
     return np.column_stack(blocks)
 
 
+def make_class_balanced_sample_weight(df: pd.DataFrame) -> np.ndarray:
+    classes = df[CLADE_COL].astype(str).to_numpy()
+    unique = np.unique(classes)
+    class_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=unique,
+        y=classes,
+    )
+    weight_map = dict(zip(unique, class_weights))
+    return np.array([weight_map[c] for c in classes], dtype=float)
+
+
 def predict_m3_linear(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
     clade_levels = sorted(train_df[CLADE_COL].dropna().unique().tolist())
@@ -165,7 +177,11 @@ def predict_m3_linear(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarr
         test_known = test_df.loc[known_mask].copy()
         X3_train = build_design_m3(train_df, clade_levels)
         X3_test = build_design_m3(test_known, clade_levels)
-        pred[known_mask] = predict_ols(X3_test, fit_ols(X3_train, y_train))
+        sw_train = make_class_balanced_sample_weight(train_df)
+        pred[known_mask] = predict_ols(
+            X3_test,
+            fit_ols(X3_train, y_train, sample_weight=sw_train),
+        )
     return pred
 
 
@@ -201,8 +217,19 @@ def load_prediction_column(
     return pred_df[column].to_numpy(dtype=float)
 
 
-def fit_ols(X: np.ndarray, y: np.ndarray) -> np.ndarray:
-    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+def fit_ols(
+    X: np.ndarray,
+    y: np.ndarray,
+    sample_weight: np.ndarray | None = None,
+) -> np.ndarray:
+    if sample_weight is None:
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        return coef
+    sw = np.asarray(sample_weight, dtype=float)
+    if sw.shape != (len(y),):
+        raise ValueError("sample_weight must have one value per training row.")
+    scale = np.sqrt(sw)
+    coef, *_ = np.linalg.lstsq(X * scale[:, None], y * scale, rcond=None)
     return coef
 
 
@@ -310,8 +337,9 @@ def evaluate_reporting_suite(
 
 
 def fit_m1_m2_on_train(train_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    # Fit M1-R and M2-R on train; return coefficients for each model.
+    # Fit class-balanced M1-R and M2-R on train.
     y_train = train_df[LOG_TARGET].to_numpy(dtype=float)
+    sw_train = make_class_balanced_sample_weight(train_df)
     X1 = np.column_stack([np.ones(len(train_df)), train_df["log_mass"].to_numpy()])
     X2 = np.column_stack(
         [
@@ -320,7 +348,10 @@ def fit_m1_m2_on_train(train_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
             train_df["inv_kT"].to_numpy(),
         ]
     )
-    return fit_ols(X1, y_train), fit_ols(X2, y_train)
+    return (
+        fit_ols(X1, y_train, sample_weight=sw_train),
+        fit_ols(X2, y_train, sample_weight=sw_train),
+    )
 
 
 def predict_m1_m2(
@@ -338,7 +369,7 @@ def predict_m1_m2(
 
 
 def predict_m_mte(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
-    # Fixed-b MTE (M2 with mass slope locked at 3/4).
+    # Class-balanced fixed-b MTE (M2 with mass slope locked at 3/4).
     #
     # Equivalent to: log_BMR ~ inv_kT + offset(0.75 * log_mass)
     #
@@ -348,7 +379,11 @@ def predict_m_mte(train_df: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
     y_adj = y_train - MTE_FIXED_B * log_mass_train
     X_train = np.column_stack([np.ones(len(train_df)), train_df["inv_kT"].to_numpy(dtype=float)])
     X_test = np.column_stack([np.ones(len(test_df)), test_df["inv_kT"].to_numpy(dtype=float)])
-    coef = fit_ols(X_train, y_adj)
+    coef = fit_ols(
+        X_train,
+        y_adj,
+        sample_weight=make_class_balanced_sample_weight(train_df),
+    )
     return MTE_FIXED_B * log_mass_test + predict_ols(X_test, coef)
 
 
@@ -361,7 +396,14 @@ def build_m1_m4_linear_metrics(train_df: pd.DataFrame, test_df: pd.DataFrame) ->
     coef_m1, coef_m2 = fit_m1_m2_on_train(train_df)
     pred_m1, pred_m2 = predict_m1_m2(test_df, coef_m1, coef_m2)
     pred_m3 = predict_m3_linear(train_df, test_df)
-    pred_m4 = predict_ols(build_design_m4(test_df), fit_ols(build_design_m4(train_df), y_train))
+    pred_m4 = predict_ols(
+        build_design_m4(test_df),
+        fit_ols(
+            build_design_m4(train_df),
+            y_train,
+            sample_weight=make_class_balanced_sample_weight(train_df),
+        ),
+    )
     rows = [
         {"model": M1_L_LABEL, **evaluate_reporting_suite(y_test, pred_m1, classes)},
         {"model": M_MTE_LABEL, **evaluate_reporting_suite(y_test, pred_mte, classes)},

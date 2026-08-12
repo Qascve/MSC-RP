@@ -28,13 +28,15 @@ def save_grouped_metric_bars(
     figsize: tuple[float, float] = (8.2, 4.8),
     legend_ncols: int = 1,
 ) -> None:
-    metric_names = list(metrics.keys())
-    values = np.array([metrics[m] for m in metric_names], dtype=float)
+    r2_names = ["Micro\n$R^2$", "Macro\n$R^2$", "Class-balanced\n$R^2$"]
+    rmse_names = ["Micro\nRMSE", "Macro\nRMSE", "Class-balanced\nRMSE"]
+    required_metrics = [*r2_names, *rmse_names]
+    missing_metrics = [name for name in required_metrics if name not in metrics]
+    if missing_metrics:
+        raise KeyError(f"Missing plot metrics: {', '.join(missing_metrics)}")
     n_models = len(models)
     if n_models == 0:
         raise ValueError("No models to plot.")
-    if values.shape != (len(metric_names), n_models):
-        raise ValueError("metrics values must be shaped as [n_metrics, n_models].")
     if len(colors) < n_models:
         raise ValueError("Need at least one color per model.")
 
@@ -46,39 +48,70 @@ def save_grouped_metric_bars(
         }
     )
 
-    fig, ax = plt.subplots(figsize=figsize)
-    x = np.arange(len(metric_names))
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
     width = min(0.16, 0.8 / n_models)
     offsets = (np.arange(n_models) - (n_models - 1) / 2.0) * width
 
-    for i, model in enumerate(models):
-        ax.bar(
-            x + offsets[i],
-            values[:, i],
-            width,
-            color=colors[i],
-            edgecolor="black",
-            linewidth=0.5,
-            label=model,
-        )
+    panel_specs = [
+        (
+            axes[0],
+            r2_names,
+            [r"Micro $R^2$", r"Macro $R^2$", "Class-balanced\n$R^2$"],
+            r"$\mathrm{R}^2$",
+            r"$\mathrm{R}^2$",
+        ),
+        (
+            axes[1],
+            rmse_names,
+            ["Micro RMSE", "Macro RMSE", "Class-balanced\nRMSE"],
+            r"$\mathrm{RMSE}$",
+            r"$\mathrm{RMSE}$",
+        ),
+    ]
+    for ax, metric_names, tick_labels, title, ylabel in panel_specs:
+        values = np.array([metrics[name] for name in metric_names], dtype=float)
+        if values.shape != (len(metric_names), n_models):
+            raise ValueError("metrics values must be shaped as [n_metrics, n_models].")
+        x = np.arange(len(metric_names))
+        for i, model in enumerate(models):
+            ax.bar(
+                x + offsets[i],
+                values[:, i],
+                width,
+                color=colors[i],
+                edgecolor="black",
+                linewidth=0.5,
+                label=model,
+            )
+        ax.set_xticks(x)
+        ax.set_xticklabels(tick_labels)
+        ax.set_title(title, fontsize=16, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=15)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(direction="out", length=6, width=1)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(metric_names)
-    ax.set_xlabel("Evaluation Metrics", fontsize=15)
-    ax.set_ylabel("Performance", fontsize=15)
-    ax.set_ylim(0, 1.05)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.tick_params(direction="out", length=6, width=1)
-    ax.legend(
-        loc="upper left",
+    r2_values = np.array([metrics[name] for name in r2_names], dtype=float)
+    r2_lower = min(-0.05, float(np.nanmin(r2_values)) - 0.05)
+    axes[0].set_ylim(r2_lower, 1.05)
+    axes[0].axhline(0, color="#555555", linewidth=0.8)
+    axes[1].set_ylim(0, max(1.05, float(np.nanmax(
+        np.array([metrics[name] for name in rmse_names], dtype=float)
+    )) + 0.05))
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
         frameon=False,
         fancybox=False,
         edgecolor="black",
         fontsize=10,
         ncol=legend_ncols,
     )
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -91,10 +124,12 @@ def build_metrics_dict(df: pd.DataFrame, models: list[str]) -> dict[str, list[fl
     if missing:
         raise KeyError(f"Missing models in metrics table: {', '.join(missing)}")
     return {
-        "RMSE": [float(by_model.loc[m, "rmse"]) for m in models],
-        r"$R^2$": [float(by_model.loc[m, "r2"]) for m in models],
-        "Balanced RMSE": [float(by_model.loc[m, "rmse_bal"]) for m in models],
-        r"Balanced $R^2$": [float(by_model.loc[m, "r2_bal"]) for m in models],
+        "Micro\nRMSE": [float(by_model.loc[m, "rmse"]) for m in models],
+        "Micro\n$R^2$": [float(by_model.loc[m, "r2"]) for m in models],
+        "Macro\nRMSE": [float(by_model.loc[m, "rmse_macro"]) for m in models],
+        "Macro\n$R^2$": [float(by_model.loc[m, "r2_macro"]) for m in models],
+        "Class-balanced\nRMSE": [float(by_model.loc[m, "rmse_bal"]) for m in models],
+        "Class-balanced\n$R^2$": [float(by_model.loc[m, "r2_bal"]) for m in models],
     }
 
 
@@ -121,6 +156,8 @@ def main() -> None:
         linear_metrics,
         out_dir / "m1_m4_metric_bars.pdf",
         colors=["#9e0b2f", "#e8704d", "#f4c9b0", "#c8dceb", "#6fa7cf"],
+        figsize=(10.5, 5.2),
+        legend_ncols=5,
     )
 
     # -----------------------------
@@ -157,8 +194,8 @@ def main() -> None:
         ml_metrics,
         out_dir / "m1_m4_ml_residual_metric_bars.pdf",
         colors=ml_colors,
-        figsize=(11.5, 5.2),
-        legend_ncols=2,
+        figsize=(13.5, 5.6),
+        legend_ncols=5,
     )
 
 

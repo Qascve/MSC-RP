@@ -313,6 +313,9 @@ LINEAR_MODEL_KEYS = (
 )
 # Models trained with class-balanced sample weights (same formula as residual XGB/RF).
 CLASS_WEIGHTED_TRAIN_MODELS = {
+    "m1_estimated_b",
+    "m_mte_fixed_b",
+    "m2_baseline_mte",
     "m3_clade_specific_mte",
     "m4_phylo_linear_mte",
     "Residual-RF",
@@ -705,8 +708,8 @@ def write_evaluation_protocol_note(out_dir: Path) -> Path:
             "  folds/test may lack that class. Classes kept in the working data with",
             "  enough species are represented across buckets when n_species >= 5.",
             "",
-            "Class-balanced sample weights (training for M3-R, M4-R, Residual-RF/XGB,",
-            "  and explore_ml RF/XGB M1–M4):",
+            "Class-balanced sample weights (training for M1-R, M-MTE, M2-R, M3-R,",
+            "  M4-R, Residual-RF/XGB, and explore_ml RF/XGB M1–M4):",
             f"- {CLASS_BALANCED_WEIGHT_FORMULA}",
             "",
             "Reported metrics:",
@@ -716,7 +719,8 @@ def write_evaluation_protocol_note(out_dir: Path) -> Path:
             "- rmse_bal/mae_bal/r2_bal: evaluation-set class-balanced weighted metrics",
             f"  using {CLASS_BALANCED_WEIGHT_FORMULA} (all models)",
             "- train_class_weighted=1 marks models whose *training* used class-balanced",
-            "  sample weights (M3-R, M4-R, Residual-RF/XGB, explore_ml M1–M4 RF/XGB);",
+            "  sample weights (M1-R, M-MTE, M2-R, M3-R, M4-R, Residual-RF/XGB,",
+            "  explore_ml M1–M4 RF/XGB);",
             "  this flag does not gate which metrics are reported",
             "",
         ]
@@ -739,25 +743,26 @@ def run_models(
     # Same class-balanced weights as residual-learning XGB/RF.
     sw_train = make_class_balanced_sample_weight(train_df)
 
-    # m1: log_BMR ~ log_mass
+    # m1: log_BMR ~ log_mass  (class-balanced WLS)
     X1_train = np.column_stack([np.ones(len(train_df)), train_df["log_mass"].to_numpy()])
     X1_test = np.column_stack([np.ones(len(test_df)), test_df["log_mass"].to_numpy()])
-    coef_m1 = fit_ols(X1_train, y_train_log)
+    coef_m1 = fit_ols(X1_train, y_train_log, sample_weight=sw_train)
     yhat_m1_train = predict_ols(X1_train, coef_m1)
     yhat_m1_log = predict_ols(X1_test, coef_m1)
 
     # m_mte: fixed-b MTE = M2 with mass slope locked at 3/4
+    # (class-balanced WLS)
     # log_BMR ~ inv_kT + offset(0.75 * log_mass)
     log_mass_train = train_df["log_mass"].to_numpy(dtype=float)
     log_mass_test = test_df["log_mass"].to_numpy(dtype=float)
     y_mte_adj = y_train_log - MTE_FIXED_B * log_mass_train
     X_mte_train = np.column_stack([np.ones(len(train_df)), train_df["inv_kT"].to_numpy()])
     X_mte_test = np.column_stack([np.ones(len(test_df)), test_df["inv_kT"].to_numpy()])
-    coef_mte = fit_ols(X_mte_train, y_mte_adj)
+    coef_mte = fit_ols(X_mte_train, y_mte_adj, sample_weight=sw_train)
     yhat_mte_train = MTE_FIXED_B * log_mass_train + predict_ols(X_mte_train, coef_mte)
     yhat_mte_log = MTE_FIXED_B * log_mass_test + predict_ols(X_mte_test, coef_mte)
 
-    # m2: log_BMR ~ log_mass + inv_kT  (estimated b)
+    # m2: log_BMR ~ log_mass + inv_kT  (estimated b; class-balanced WLS)
     X2_train = np.column_stack(
         [
             np.ones(len(train_df)),
@@ -772,7 +777,7 @@ def run_models(
             test_df["inv_kT"].to_numpy(),
         ]
     )
-    coef_m2 = fit_ols(X2_train, y_train_log)
+    coef_m2 = fit_ols(X2_train, y_train_log, sample_weight=sw_train)
     yhat_m2_train = predict_ols(X2_train, coef_m2)
     yhat_m2_log = predict_ols(X2_test, coef_m2)
 
