@@ -586,7 +586,7 @@ def fit_m2_mass_slope(
     return float(coef[1]), se, float(coef[0]), float(coef[2]), n
 
 
-POOLED_LABEL = "All Animals (pooled)"
+POOLED_LABEL = "All Animals"
 
 
 def build_slope_summary(df: pd.DataFrame, min_rows: int) -> pd.DataFrame:
@@ -651,7 +651,11 @@ def build_slope_summary(df: pd.DataFrame, min_rows: int) -> pd.DataFrame:
     return summary
 
 
-def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
+def save_slope_plot(
+    summary: pd.DataFrame,
+    training_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
     if summary.empty:
         raise ValueError("No class-level slope estimates available for plotting.")
 
@@ -663,7 +667,7 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
     global_n_species = int(summary.attrs["global_n_species"])
     pooled_label = str(summary.attrs.get("pooled_label", POOLED_LABEL))
 
-    # All Animals first, then classes ordered by increasing b (same as before).
+    # All Animals first, then classes ordered by increasing b.
     plot_df = pd.concat(
         [
             pd.DataFrame(
@@ -676,11 +680,10 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
                         "ci95_high": global_ci_high,
                         "n_rows": global_n,
                         "n_species": global_n_species,
-                        "is_pooled": True,
                     }
                 ]
             ),
-            summary.assign(is_pooled=False),
+            summary,
         ],
         ignore_index=True,
         sort=False,
@@ -690,7 +693,7 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
     labels = plot_df["class"].tolist()
     y_pos = np.arange(len(labels))
 
-    fig_height = max(5.0, 0.5 * len(labels) + 2.2)
+    fig_height = max(6.0, 0.5 * len(labels) + 2.5)
     with plt.rc_context(
         {
             "font.weight": "bold",
@@ -704,18 +707,20 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
             "legend.fontsize": LEGEND_SIZE,
         }
     ):
-        fig, ax = plt.subplots(figsize=(9.5, fig_height))
+        fig, (ax_left, ax_right) = plt.subplots(
+            1,
+            2,
+            figsize=(16.0, fig_height),
+            gridspec_kw={"width_ratios": [1.0, 1.35]},
+        )
 
-        class_mask = ~plot_df["is_pooled"].to_numpy(dtype=bool)
-        pooled_mask = plot_df["is_pooled"].to_numpy(dtype=bool)
-
-        # Class-level estimates
-        ax.errorbar(
-            plot_df.loc[class_mask, "b"],
-            y_pos[class_mask],
+        # All Animals and class-level estimates use the same visual encoding.
+        ax_left.errorbar(
+            plot_df["b"],
+            y_pos,
             xerr=[
-                plot_df.loc[class_mask, "b"] - plot_df.loc[class_mask, "ci95_low"],
-                plot_df.loc[class_mask, "ci95_high"] - plot_df.loc[class_mask, "b"],
+                plot_df["b"] - plot_df["ci95_low"],
+                plot_df["ci95_high"] - plot_df["b"],
             ],
             fmt="o",
             color="#4C72B0",
@@ -723,51 +728,34 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
             elinewidth=1.2,
             capsize=3,
             markersize=6,
-            label="Class 95% CI",
+            label="M2 estimate (95% CI)",
             zorder=3,
-        )
-        # Pooled training-set estimate (same statistical object as class points)
-        ax.errorbar(
-            plot_df.loc[pooled_mask, "b"],
-            y_pos[pooled_mask],
-            xerr=[
-                plot_df.loc[pooled_mask, "b"] - plot_df.loc[pooled_mask, "ci95_low"],
-                plot_df.loc[pooled_mask, "ci95_high"] - plot_df.loc[pooled_mask, "b"],
-            ],
-            fmt="D",
-            color="#55A868",
-            ecolor="#55A868",
-            elinewidth=1.6,
-            capsize=4,
-            markersize=7,
-            label="Pooled estimate 95% CI",
-            zorder=4,
         )
 
         # Only the theoretical MTE value remains a reference line.
-        ax.axvline(
+        ax_left.axvline(
             REFERENCE_SLOPE,
             color="#C44E52",
             linestyle="--",
             linewidth=1.6,
-            label=f"b = {REFERENCE_SLOPE:.2f}(MTE)",
+            label=f"M-MTE: b = {REFERENCE_SLOPE:.2f}",
             zorder=2,
         )
 
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(labels, fontsize=TICK_SIZE, fontweight="bold")
-        ax.set_xlabel(
+        ax_left.set_yticks(y_pos)
+        ax_left.set_yticklabels(labels, fontsize=TICK_SIZE, fontweight="bold")
+        ax_left.set_xlabel(
             "Estimated exponent b (M2)",
             fontsize=LABEL_SIZE,
             fontweight="bold",
         )
-        ax.set_ylabel("")
-        ax.set_title(
-            "Exponent estimates on the training set",
+        ax_left.set_ylabel("")
+        ax_left.set_title(
+            "A — Exponent estimates on the training set",
             fontsize=TITLE_SIZE,
             fontweight="bold",
         )
-        ax.grid(axis="x", alpha=0.25, linestyle=":")
+        ax_left.grid(axis="x", alpha=0.25, linestyle=":")
 
         # Sample sizes to the right of each CI.
         x_right = float(np.nanmax(plot_df["ci95_high"].to_numpy(dtype=float)))
@@ -775,27 +763,112 @@ def save_slope_plot(summary: pd.DataFrame, output_path: Path) -> None:
         span = max(x_right - x_left, 0.05)
         annotate_x = x_right + 0.04 * span
         for y, (_, row) in zip(y_pos, plot_df.iterrows()):
-            ax.text(
+            ax_left.text(
                 annotate_x,
                 y,
-                rf"$n_{{\mathrm{{species}}}}={int(row['n_species'])}$",
+                rf"$n={int(row['n_species'])}$",
                 va="center",
                 ha="left",
-                fontsize=TICK_SIZE - 2,
+                fontsize=TICK_SIZE,
                 fontweight="bold",
                 color="#333333",
             )
-        ax.set_xlim(x_left - 0.05 * span, annotate_x + 0.45 * span)
+        ax_left.set_xlim(x_left - 0.05 * span, annotate_x + 0.28 * span)
 
-        ax.legend(
-            loc="lower left",
-            bbox_to_anchor=(1.02, 0.0),
-            borderaxespad=0.0,
+        ax_left.legend(
+            loc="lower right",
             frameon=True,
             prop={"size": LEGEND_SIZE, "weight": "bold"},
         )
-        apply_bold_fonts(ax)
-        fig.tight_layout()
+
+        # Panel B: every training observation, including repeated observations
+        # of the same species, coloured by taxonomic class.
+        class_levels = sorted(training_df[CLADE_COL].dropna().astype(str).unique())
+        palette = sns.color_palette("tab10", n_colors=len(class_levels))
+        color_map = dict(zip(class_levels, palette))
+        for class_name in class_levels:
+            class_mask = training_df[CLADE_COL].astype(str).eq(class_name)
+            ax_right.scatter(
+                training_df.loc[class_mask, "log_mass"],
+                training_df.loc[class_mask, LOG_TARGET],
+                s=15,
+                alpha=0.45,
+                color=color_map[class_name],
+                edgecolors="none",
+                label=class_name,
+                zorder=1,
+            )
+
+        x_grid = np.linspace(
+            float(training_df["log_mass"].min()),
+            float(training_df["log_mass"].max()),
+            300,
+        )
+        reference_inv_kT = float(training_df["inv_kT"].median())
+        m2_line = (
+            float(summary.attrs["global_intercept"])
+            + global_b * x_grid
+            + float(summary.attrs["global_temp_coef"]) * reference_inv_kT
+        )
+
+        y_train = training_df[LOG_TARGET].to_numpy(dtype=float)
+        x_train = training_df["log_mass"].to_numpy(dtype=float)
+        t_train = training_df["inv_kT"].to_numpy(dtype=float)
+        mte_design = np.column_stack([np.ones(len(training_df)), t_train])
+        mte_coef, *_ = np.linalg.lstsq(
+            mte_design,
+            y_train - REFERENCE_SLOPE * x_train,
+            rcond=None,
+        )
+        mte_line = (
+            REFERENCE_SLOPE * x_grid
+            + float(mte_coef[0])
+            + float(mte_coef[1]) * reference_inv_kT
+        )
+        ax_right.plot(
+            x_grid,
+            m2_line,
+            color="black",
+            linewidth=2.2,
+            linestyle="-",
+            label="M2",
+            zorder=4,
+        )
+        ax_right.plot(
+            x_grid,
+            mte_line,
+            color="black",
+            linewidth=2.2,
+            linestyle="--",
+            label="M-MTE",
+            zorder=4,
+        )
+        ax_right.set_xlabel(
+            r"$\log_{10}(\mathrm{Mass\ [kg]})$",
+            fontsize=LABEL_SIZE,
+            fontweight="bold",
+        )
+        ax_right.set_ylabel(
+            r"$\log_{10}(\mathrm{BMR})$",
+            fontsize=LABEL_SIZE,
+            fontweight="bold",
+        )
+        ax_right.set_title(
+            "B — Observations and fitted relationships",
+            fontsize=TITLE_SIZE,
+            fontweight="bold",
+        )
+        ax_right.grid(alpha=0.20, linestyle=":")
+        ax_right.legend(
+            loc="best",
+            ncol=2,
+            frameon=True,
+            prop={"size": LEGEND_SIZE - 1, "weight": "bold"},
+        )
+
+        apply_bold_fonts(ax_left)
+        apply_bold_fonts(ax_right)
+        fig.tight_layout(w_pad=2.5)
         fig.savefig(output_path, bbox_inches="tight", facecolor="white")
         plt.close(fig)
 
@@ -950,7 +1023,7 @@ def main() -> None:
             f"No classes met min_rows={args.min_rows}. Lower --min-rows or check training data."
         )
 
-    save_slope_plot(summary, output_path)
+    save_slope_plot(summary, train_df, output_path)
     write_summary_table(summary, summary_output_path)
 
     m1_m4_linear_metrics = build_m1_m4_linear_metrics(train_model_df, test_model_df)
@@ -992,11 +1065,11 @@ def main() -> None:
     global_n_species = int(summary.attrs["global_n_species"])
     print(f"Slope model: {summary.attrs.get('slope_model')}")
     print(
-        f"Pooled M2 b = {global_b:.4f} (SE = {global_se:.4f}; "
+        f"All Animals M2 b = {global_b:.4f} (SE = {global_se:.4f}; "
         f"temp_coef = {global_temp:.4f}; n_species = {global_n_species}; "
         f"reference b = {REFERENCE_SLOPE:.2f})"
     )
-    print(f"Plotted classes: {len(summary)} + pooled All Animals row")
+    print(f"Plotted classes: {len(summary)} + All Animals row")
     print(f"Saved plot: {output_path}")
     print(f"Saved summary: {summary_output_path}")
     print(f"Saved M1–M4 linear comparison plot: {m1_m4_linear_output_path}")
