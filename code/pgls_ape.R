@@ -436,8 +436,10 @@ main <- function() {
     test$y_pred_log_BMR,
     test$class
   )
+  # Always report micro/macro/bal (evaluation metrics; training is unweighted GLS).
   metric_out <- data.frame(
-    model = paste0("M4-", gsub("^pglsModel_", "", best_model_name)),
+    model = "M4-PGLS",
+    correlation = best_model_name,
     scale = "log10_BMR",
     train_class_weighted = 0L,
     test_metrics_log,

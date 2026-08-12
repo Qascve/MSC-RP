@@ -623,24 +623,12 @@ def _build_model_metrics(
     if comparison_mask is None:
         comparison_mask = np.ones(len(eval_df), dtype=bool)
     metric_rows = []
-    empty_extra = {
-        "rmse_macro": np.nan,
-        "mae_macro": np.nan,
-        "r2_macro": np.nan,
-        "n_classes_eval": np.nan,
-        "rmse_bal": np.nan,
-        "mae_bal": np.nan,
-        "r2_bal": np.nan,
-    }
     for model_name, y_pred in sorted(predictions.items()):
         y_t = y_true[comparison_mask]
         y_p = y_pred[comparison_mask]
-        # Macro / class-balanced metrics only for models trained with class weights.
-        # Unweighted models (M1/M-MTE/M2 linear, PGLS) keep micro rmse/mae/r2 only.
-        if model_name in CLASS_WEIGHTED_TRAIN_MODELS:
-            suite = evaluate_reporting_suite(y_t, y_p, classes[comparison_mask])
-        else:
-            suite = {**evaluate(y_t, y_p), **empty_extra}
+        # Always report micro + macro + class-balanced metrics on the evaluation set.
+        # train_class_weighted only records whether training used class-balanced weights.
+        suite = evaluate_reporting_suite(y_t, y_p, classes[comparison_mask])
         metric_rows.append(
             {
                 "model": model_name,
@@ -652,6 +640,48 @@ def _build_model_metrics(
     metrics_df["model_key"] = metrics_df["model"]
     metrics_df["model"] = metrics_df["model"].map(to_short_model_name)
     return metrics_df
+
+
+def write_m3_r_metrics_by_class(
+    test_df: pd.DataFrame,
+    y_true: np.ndarray,
+    predictions: dict[str, np.ndarray],
+    output_path: Path,
+) -> pd.DataFrame:
+    """Write held-out test metrics for M3-R separately within each class."""
+    if "M3-R" not in predictions:
+        raise KeyError("M3-R predictions are unavailable for per-class evaluation.")
+
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(predictions["M3-R"], dtype=float)
+    if len(test_df) != len(y_true) or len(y_true) != len(y_pred):
+        raise ValueError("M3-R per-class inputs have inconsistent row counts.")
+
+    rows: list[dict[str, object]] = []
+    class_values = test_df[CLADE_COL].astype(str).to_numpy()
+    for class_name in sorted(pd.unique(class_values)):
+        mask = (
+            (class_values == class_name)
+            & np.isfinite(y_true)
+            & np.isfinite(y_pred)
+        )
+        class_df = test_df.loc[mask]
+        if class_df.empty:
+            continue
+        class_metrics = evaluate(y_true[mask], y_pred[mask])
+        rows.append(
+            {
+                "class": class_name,
+                "n_species": int(class_df["taxon_name"].nunique()),
+                "n_obs": int(mask.sum()),
+                **class_metrics,
+            }
+        )
+
+    result = pd.DataFrame(rows).sort_values("class").reset_index(drop=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(output_path, index=False, encoding="utf-8")
+    return result
 
 
 def write_evaluation_protocol_note(out_dir: Path) -> Path:
@@ -681,10 +711,13 @@ def write_evaluation_protocol_note(out_dir: Path) -> Path:
             "",
             "Reported metrics:",
             "- rmse/mae/r2: micro-averaged over all pooled evaluation rows (all models)",
-            "- rmse_macro/mae_macro/r2_macro and rmse_bal/mae_bal/r2_bal: only for",
-            "  models trained with class-balanced weights (M3-R, M4-R, Residual-RF/XGB,",
-            "  explore_ml M1–M4 RF/XGB)",
-            "- train_class_weighted=1 marks those models",
+            "- rmse_macro/mae_macro/r2_macro: equal average of per-class micro metrics",
+            "  (all models)",
+            "- rmse_bal/mae_bal/r2_bal: evaluation-set class-balanced weighted metrics",
+            f"  using {CLASS_BALANCED_WEIGHT_FORMULA} (all models)",
+            "- train_class_weighted=1 marks models whose *training* used class-balanced",
+            "  sample weights (M3-R, M4-R, Residual-RF/XGB, explore_ml M1–M4 RF/XGB);",
+            "  this flag does not gate which metrics are reported",
             "",
         ]
     )
@@ -1338,6 +1371,13 @@ def main() -> None:
         train_metrics_path = fold_out / "explore_metrics_train.csv"
         train_metrics_out = train_metrics_df.drop(columns=["model_key"], errors="ignore")
         train_metrics_out.to_csv(train_metrics_path, index=False, encoding="utf-8")
+        m3_r_class_metrics_path = fold_out / "m3_r_metrics_by_class.csv"
+        m3_r_class_metrics = write_m3_r_metrics_by_class(
+            test_df,
+            y_true,
+            predictions,
+            m3_r_class_metrics_path,
+        )
         protocol_path = write_evaluation_protocol_note(fold_out)
 
         plot_path = save_model_performance_plot(metrics_out, fold_out, fold_tag=fold_tag)
@@ -1358,25 +1398,30 @@ def main() -> None:
         print(f"[{fold_tag}] Saved train linear metrics: {train_linear_path}")
         print(f"[{fold_tag}] Saved all metrics: {metrics_path}")
         print(f"[{fold_tag}] Saved train metrics: {train_metrics_path}")
+        print(f"\n[{fold_tag}] M3-R TEST METRICS BY CLASS:")
+        print(m3_r_class_metrics.to_string(index=False))
+        print(f"[{fold_tag}] Saved M3-R class metrics: {m3_r_class_metrics_path}")
         print(f"[{fold_tag}] Saved evaluation protocol: {protocol_path}")
         print(f"[{fold_tag}] Class-balanced weight formula: {CLASS_BALANCED_WEIGHT_FORMULA}")
-        weighted = metrics_out.loc[metrics_out["train_class_weighted"] == 1]
-        if not weighted.empty:
-            cols = [
-                c
-                for c in (
-                    "model",
-                    "rmse",
-                    "rmse_macro",
-                    "rmse_bal",
-                    "mae",
-                    "mae_macro",
-                    "mae_bal",
-                )
-                if c in weighted.columns
-            ]
-            print(f"\n[{fold_tag}] CLASS-WEIGHTED MODELS (micro / macro / bal):")
-            print(weighted[cols].to_string(index=False))
+        cols = [
+            c
+            for c in (
+                "model",
+                "train_class_weighted",
+                "rmse",
+                "rmse_macro",
+                "rmse_bal",
+                "mae",
+                "mae_macro",
+                "mae_bal",
+                "r2",
+                "r2_macro",
+                "r2_bal",
+            )
+            if c in metrics_out.columns
+        ]
+        print(f"\n[{fold_tag}] ALL MODELS (micro / macro / bal):")
+        print(metrics_out[cols].to_string(index=False))
         print(f"[{fold_tag}] Saved plot: {plot_path}")
         print(f"[{fold_tag}] Saved top-5 plot: {top5_residual_plot_path}")
         print(f"[{fold_tag}] Saved top-5 metrics: {top5_residual_metrics_path}")

@@ -1,2 +1,2 @@
-"model","scale","train_class_weighted","n","rmse","mae","r2","rmse_macro","mae_macro","r2_macro","n_classes_eval","rmse_bal","mae_bal","r2_bal"
-"M4-Brownian","log10_BMR",0,1014,0.695566303496452,0.589398073347887,0.786263542191089,0.857869446886333,0.769700385257914,-0.127442617010622,8,0.884457515500341,0.769700385257914,0.718905523507549
+"model","correlation","scale","train_class_weighted","n","rmse","mae","r2","rmse_macro","mae_macro","r2_macro","n_classes_eval","rmse_bal","mae_bal","r2_bal"
+"M4-PGLS","pglsModel_Brownian","log10_BMR",0,1014,0.695566303496452,0.589398073347887,0.786263542191089,0.857869446886333,0.769700385257914,-0.127442617010622,8,0.884457515500341,0.769700385257914,0.718905523507549
