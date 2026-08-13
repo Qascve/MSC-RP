@@ -693,25 +693,25 @@ def save_slope_plot(
     labels = plot_df["class"].tolist()
     y_pos = np.arange(len(labels))
 
-    fig_height = max(6.0, 0.5 * len(labels) + 2.5)
     with plt.rc_context(
         {
+            "font.family": "sans-serif",
             "font.weight": "bold",
             "axes.labelweight": "bold",
             "axes.titleweight": "bold",
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_SIZE,
-            "axes.labelsize": LABEL_SIZE,
-            "xtick.labelsize": TICK_SIZE,
-            "ytick.labelsize": TICK_SIZE,
-            "legend.fontsize": LEGEND_SIZE,
+            "font.size": 20,
+            "axes.titlesize": 20,
+            "axes.labelsize": 20,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
+            "legend.fontsize": 20,
         }
     ):
         fig, (ax_left, ax_right) = plt.subplots(
             1,
             2,
-            figsize=(16.0, fig_height),
-            gridspec_kw={"width_ratios": [1.0, 1.35]},
+            figsize=(25.0, 12.0),
+            gridspec_kw={"width_ratios": [1.0, 1.0]},
         )
 
         # All Animals and class-level estimates use the same visual encoding.
@@ -743,19 +743,13 @@ def save_slope_plot(
         )
 
         ax_left.set_yticks(y_pos)
-        ax_left.set_yticklabels(labels, fontsize=TICK_SIZE, fontweight="bold")
+        ax_left.set_yticklabels(labels, fontsize=24, fontweight="bold")
         ax_left.set_xlabel(
             "Estimated exponent b (M2)",
-            fontsize=LABEL_SIZE,
+            fontsize=24,
             fontweight="bold",
         )
         ax_left.set_ylabel("")
-        ax_left.set_title(
-            "A — Exponent estimates on the training set",
-            fontsize=TITLE_SIZE,
-            fontweight="bold",
-        )
-        ax_left.grid(axis="x", alpha=0.25, linestyle=":")
 
         # Sample sizes to the right of each CI.
         x_right = float(np.nanmax(plot_df["ci95_high"].to_numpy(dtype=float)))
@@ -769,16 +763,17 @@ def save_slope_plot(
                 rf"$n={int(row['n_species'])}$",
                 va="center",
                 ha="left",
-                fontsize=TICK_SIZE,
+                fontsize=24,
                 fontweight="bold",
                 color="#333333",
             )
         ax_left.set_xlim(x_left - 0.05 * span, annotate_x + 0.28 * span)
 
         ax_left.legend(
-            loc="lower right",
+            loc="center right",
+            bbox_to_anchor=(0.8, 0.85),
             frameon=True,
-            prop={"size": LEGEND_SIZE, "weight": "bold"},
+            prop={"size": 20, "weight": "bold"},
         )
 
         # Panel B: every training observation, including repeated observations
@@ -786,9 +781,10 @@ def save_slope_plot(
         class_levels = sorted(training_df[CLADE_COL].dropna().astype(str).unique())
         palette = sns.color_palette("tab10", n_colors=len(class_levels))
         color_map = dict(zip(class_levels, palette))
+        taxonomy_handles = []
         for class_name in class_levels:
             class_mask = training_df[CLADE_COL].astype(str).eq(class_name)
-            ax_right.scatter(
+            scatter_handle = ax_right.scatter(
                 training_df.loc[class_mask, "log_mass"],
                 training_df.loc[class_mask, LOG_TARGET],
                 s=15,
@@ -798,6 +794,7 @@ def save_slope_plot(
                 label=class_name,
                 zorder=1,
             )
+            taxonomy_handles.append(scatter_handle)
 
         x_grid = np.linspace(
             float(training_df["log_mass"].min()),
@@ -825,7 +822,7 @@ def save_slope_plot(
             + float(mte_coef[0])
             + float(mte_coef[1]) * reference_inv_kT
         )
-        ax_right.plot(
+        m2_handle, = ax_right.plot(
             x_grid,
             m2_line,
             color="black",
@@ -834,7 +831,7 @@ def save_slope_plot(
             label="M2",
             zorder=4,
         )
-        ax_right.plot(
+        mte_handle, = ax_right.plot(
             x_grid,
             mte_line,
             color="black",
@@ -844,32 +841,44 @@ def save_slope_plot(
             zorder=4,
         )
         ax_right.set_xlabel(
-            r"$\log_{10}(\mathrm{Mass\ [kg]})$",
-            fontsize=LABEL_SIZE,
+            r"$\mathbf{\log_{10}(Mass\ [kg])}$",
+            fontsize=24,
             fontweight="bold",
         )
         ax_right.set_ylabel(
-            r"$\log_{10}(\mathrm{BMR})$",
-            fontsize=LABEL_SIZE,
+            r"$\mathbf{\log_{10}(BMR)}$",
+            fontsize=24,
             fontweight="bold",
         )
-        ax_right.set_title(
-            "B — Observations and fitted relationships",
-            fontsize=TITLE_SIZE,
-            fontweight="bold",
-        )
-        ax_right.grid(alpha=0.20, linestyle=":")
-        ax_right.legend(
-            loc="best",
-            ncol=2,
+        line_legend = ax_right.legend(
+            handles=[m2_handle, mte_handle],
+            labels=["M2", "M-MTE"],
+            loc="lower right",
+            bbox_to_anchor=(0.62, 0.02),
             frameon=True,
-            prop={"size": LEGEND_SIZE - 1, "weight": "bold"},
+            prop={"size": 24, "weight": "bold"},
+        )
+        ax_right.add_artist(line_legend)
+        ax_right.legend(
+            handles=taxonomy_handles,
+            labels=class_levels,
+            title="Taxonomic groups",
+            loc="lower right",
+            bbox_to_anchor=(0.99, 0.02),
+            ncol=1,
+            markerscale=6.0,
+            frameon=True,
+            prop={"size": 24, "weight": "bold"},
+            title_fontproperties={"size": 24, "weight": "bold"},
         )
 
-        apply_bold_fonts(ax_left)
-        apply_bold_fonts(ax_right)
+        for axis in (ax_left, ax_right):
+            axis.tick_params(axis="both", labelsize=24, width=1.4, length=7)
+            for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
+                tick_label.set_fontsize(24)
+                tick_label.set_fontweight("bold")
         fig.tight_layout(w_pad=2.5)
-        fig.savefig(output_path, bbox_inches="tight", facecolor="white")
+        fig.savefig(output_path, facecolor="white")
         plt.close(fig)
 
 

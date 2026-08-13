@@ -25,7 +25,6 @@ def save_grouped_metric_bars(
     output_path: Path,
     *,
     colors: list[str],
-    figsize: tuple[float, float] = (8.2, 4.8),
     legend_ncols: int = 1,
 ) -> None:
     r2_names = ["Micro\n$R^2$", "Macro\n$R^2$", "Class-balanced\n$R^2$"]
@@ -43,12 +42,16 @@ def save_grouped_metric_bars(
     plt.rcParams.update(
         {
             "font.family": "sans-serif",
-            "font.size": 14,
+            "font.size": 24,
+            "font.weight": "bold",
+            "axes.labelweight": "bold",
+            "axes.titleweight": "bold",
             "axes.linewidth": 1.2,
         }
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    # Both outputs use the same fixed physical dimensions.
+    fig, axes = plt.subplots(1, 2, figsize=(20, 10))
     width = min(0.16, 0.8 / n_models)
     offsets = (np.arange(n_models) - (n_models - 1) / 2.0) * width
 
@@ -56,27 +59,30 @@ def save_grouped_metric_bars(
         (
             axes[0],
             r2_names,
-            [r"Micro $R^2$", r"Macro $R^2$", "Class-balanced\n$R^2$"],
-            r"$\mathrm{R}^2$",
-            r"$\mathrm{R}^2$",
+            ["Micro", "Macro", "Class-balanced"],
+            "",
+            "R²",
         ),
         (
             axes[1],
             rmse_names,
-            ["Micro RMSE", "Macro RMSE", "Class-balanced\nRMSE"],
-            r"$\mathrm{RMSE}$",
-            r"$\mathrm{RMSE}$",
+            ["Micro", "Macro", "Class-balanced"],
+            "",
+            "RMSE",
         ),
     ]
     for ax, metric_names, tick_labels, title, ylabel in panel_specs:
         values = np.array([metrics[name] for name in metric_names], dtype=float)
         if values.shape != (len(metric_names), n_models):
             raise ValueError("metrics values must be shaped as [n_metrics, n_models].")
+        # For visual clarity, negative R² bars are displayed at zero only in
+        # these plots; source CSV values remain unchanged.
+        plot_values = np.maximum(values, 0.0) if metric_names == r2_names else values
         x = np.arange(len(metric_names))
         for i, model in enumerate(models):
             ax.bar(
                 x + offsets[i],
-                values[:, i],
+                plot_values[:, i],
                 width,
                 color=colors[i],
                 edgecolor="black",
@@ -84,17 +90,16 @@ def save_grouped_metric_bars(
                 label=model,
             )
         ax.set_xticks(x)
-        ax.set_xticklabels(tick_labels)
-        ax.set_title(title, fontsize=16, fontweight="bold")
-        ax.set_ylabel(ylabel, fontsize=15)
+        ax.set_xticklabels(tick_labels, fontsize=24, fontweight="bold")
+        ax.set_title(title, fontsize=24, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=24, fontweight="bold")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.tick_params(direction="out", length=6, width=1)
+        ax.tick_params(direction="out", length=7, width=1.2, labelsize=24)
+        for tick_label in ax.get_yticklabels():
+            tick_label.set_fontweight("bold")
 
-    r2_values = np.array([metrics[name] for name in r2_names], dtype=float)
-    r2_lower = min(-0.05, float(np.nanmin(r2_values)) - 0.05)
-    axes[0].set_ylim(r2_lower, 1.05)
-    axes[0].axhline(0, color="#555555", linewidth=0.8)
+    axes[0].set_ylim(0, 1.05)
     axes[1].set_ylim(0, max(1.05, float(np.nanmax(
         np.array([metrics[name] for name in rmse_names], dtype=float)
     )) + 0.05))
@@ -108,12 +113,12 @@ def save_grouped_metric_bars(
         frameon=False,
         fancybox=False,
         edgecolor="black",
-        fontsize=10,
+        prop={"size": 24, "weight": "bold"},
         ncol=legend_ncols,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    fig.tight_layout(rect=(0, 0, 1, 0.82))
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
+    fig.savefig(output_path, facecolor="white")
     plt.close(fig)
     print(f"Saved plot: {output_path}")
 
@@ -156,7 +161,6 @@ def main() -> None:
         linear_metrics,
         out_dir / "m1_m4_metric_bars.pdf",
         colors=["#9e0b2f", "#e8704d", "#f4c9b0", "#c8dceb", "#6fa7cf"],
-        figsize=(10.5, 5.2),
         legend_ncols=5,
     )
 
@@ -194,7 +198,6 @@ def main() -> None:
         ml_metrics,
         out_dir / "m1_m4_ml_residual_metric_bars.pdf",
         colors=ml_colors,
-        figsize=(13.5, 5.6),
         legend_ncols=5,
     )
 
