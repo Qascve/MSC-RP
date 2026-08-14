@@ -240,6 +240,15 @@ def edge_path(parent_radius: float, parent_angle: float, child_radius: float, ch
     )
 
 
+def svg_arc_path(radius: float, start_angle: float, end_angle: float) -> str:
+    start_x, start_y = polar_to_xy(radius, start_angle)
+    end_x, end_y = polar_to_xy(radius, end_angle)
+    return (
+        f"M {start_x:.3f} {start_y:.3f} "
+        f"A {radius:.3f} {radius:.3f} 0 0 1 {end_x:.3f} {end_y:.3f}"
+    )
+
+
 def circular_edge_points(
     parent_radius: float,
     parent_angle: float,
@@ -304,13 +313,54 @@ def write_interactive_html(
     clade_accuracy_cache = {id(clade): clade_accuracy(clade, tip_accuracy) for clade in tree.find_clades()}
     paths: list[str] = []
     tip_index: list[dict[str, object]] = []
-    legend_x = 1055.0
-    legend_y = 430.0
+    terminals = tree.get_terminals()
+    class_levels = sorted(
+        {
+            str(tip_records.get(tip.name, {}).get("class"))
+            for tip in terminals
+            if pd.notna(tip_records.get(tip.name, {}).get("class"))
+        }
+    )
+    class_palette = list(plt.colormaps["tab10"].colors)
+    class_colors = {
+        class_name: mcolors.to_hex(class_palette[index])
+        for index, class_name in enumerate(class_levels)
+    }
+    angle_width = 2.0 * math.pi / max(len(terminals), 1)
+    class_ring_paths = []
+    for tip in terminals:
+        class_name = str(tip_records.get(tip.name, {}).get("class", ""))
+        if class_name not in class_colors:
+            continue
+        center_angle = angle_by_clade[id(tip)]
+        ring_path = svg_arc_path(
+            475.0,
+            center_angle - 0.48 * angle_width,
+            center_angle + 0.48 * angle_width,
+        )
+        class_ring_paths.append(
+            f'<path class="class-ring" d="{ring_path}" '
+            f'stroke="{class_colors[class_name]}"></path>'
+        )
+
+    class_legend_items = "".join(
+        (
+            '<div class="clade-key-row">'
+            f'<span class="clade-swatch" style="background:{class_colors[class_name]}"></span>'
+            f'<span>{html.escape(class_name)}</span>'
+            "</div>"
+        )
+        for class_name in class_levels
+    )
+    viridis_css = ", ".join(
+        f"{mcolors.to_hex(plt.get_cmap('viridis_r')(fraction))} {int(fraction * 100)}%"
+        for fraction in np.linspace(0.0, 1.0, 9)
+    )
 
     for parent in tree.find_clades(order="level"):
         for child in parent.clades:
             accuracy = clade_accuracy_cache[id(child)]
-            color = accuracy_to_color(accuracy)
+            color = pdf_accuracy_to_color(accuracy)
             path_data = edge_path(
                 radius_by_clade[id(parent)],
                 angle_by_clade[id(parent)],
@@ -359,15 +409,9 @@ def write_interactive_html(
       color: #222;
     }}
     .page {{
-      width: 1120px;
+      width: 1280px;
       margin: 20px auto;
       position: relative;
-    }}
-    h1 {{
-      text-align: center;
-      font-size: 22px;
-      font-weight: 500;
-      margin: 10px 0 0;
     }}
     .search-bar {{
       display: flex;
@@ -402,20 +446,69 @@ def write_interactive_html(
       color: #666;
       min-height: 18px;
     }}
-    svg {{
+    .visualization {{
+      display: grid;
+      grid-template-columns: 1080px 200px;
+      align-items: start;
+    }}
+    #tree-svg {{
       display: block;
-      margin: 0 auto;
+      overflow: hidden;
+    }}
+    .legend-sidebar {{
+      position: sticky;
+      top: 20px;
+      padding: 16px 8px;
+      background: #ffffff;
+      z-index: 20;
+    }}
+    .side-legend-title {{
+      margin: 0 0 10px;
+      font-size: 16px;
+      font-weight: normal;
+    }}
+    .clade-key-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 7px 0;
+      font-size: 12px;
+    }}
+    .clade-swatch {{
+      width: 18px;
+      height: 18px;
+      flex: 0 0 18px;
+    }}
+    .accuracy-key {{
+      margin-top: 70px;
+    }}
+    .accuracy-scale-wrap {{
+      display: flex;
+      align-items: stretch;
+      gap: 9px;
+    }}
+    .accuracy-gradient {{
+      width: 22px;
+      height: 170px;
+      background: linear-gradient(to top, {viridis_css});
+    }}
+    .accuracy-labels {{
+      height: 170px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      font-size: 12px;
     }}
     .branch {{
       fill: none;
-      stroke-width: 1.05;
+      stroke-width: 2.5;
       stroke-linecap: round;
       opacity: 0.86;
       cursor: default;
       transition: stroke-width 0.15s ease, opacity 0.15s ease;
     }}
     .branch:hover {{
-      stroke-width: 3.2;
+      stroke-width: 4.2;
       opacity: 1;
     }}
     .tip-focus-ring {{
@@ -443,17 +536,15 @@ def write_interactive_html(
       line-height: 1.35;
       z-index: 1000;
     }}
-    .legend-title {{
-      font-size: 16px;
-    }}
-    .legend-label {{
-      font-size: 12px;
+    .class-ring {{
+      fill: none;
+      stroke-width: 22px;
+      pointer-events: none;
     }}
   </style>
 </head>
 <body>
   <div class="page">
-    <h1>XGB residual-learning accuracy across test-set species</h1>
     <div class="search-bar">
       <input id="species-search" type="search" list="species-options"
              placeholder="Search species, e.g. Rhinella marina" autocomplete="off">
@@ -464,29 +555,34 @@ def write_interactive_html(
       <button id="search-reset" type="button">Reset view</button>
     </div>
     <div id="search-status"></div>
-    <svg id="tree-svg" width="1120" height="1040" viewBox="0 0 1120 1040" role="img">
-      <defs>
-        <linearGradient id="accuracy-gradient" x1="0" x2="0" y1="1" y2="0">
-          <stop offset="0%" stop-color="{LOW_COLOR}"/>
-          <stop offset="50%" stop-color="{MID_COLOR}"/>
-          <stop offset="100%" stop-color="{HIGH_COLOR}"/>
-        </linearGradient>
-      </defs>
-      <g id="tree-stage" transform="translate(60, 20) scale(1)">
-        {''.join(paths)}
-        <circle id="tip-focus-ring" class="tip-focus-ring" cx="0" cy="0" r="18"></circle>
-      </g>
-      <g transform="translate({legend_x:.0f}, {legend_y:.0f})">
-        <text class="legend-title" x="0" y="-18">Prediction</text>
-        <text class="legend-title" x="0" y="0">accuracy</text>
-        <rect x="0" y="16" width="26" height="150" fill="url(#accuracy-gradient)"></rect>
-        <text class="legend-label" x="36" y="20">1.00</text>
-        <text class="legend-label" x="36" y="58">0.75</text>
-        <text class="legend-label" x="36" y="96">0.50</text>
-        <text class="legend-label" x="36" y="134">0.25</text>
-        <text class="legend-label" x="36" y="170">0.00</text>
-      </g>
-    </svg>
+    <div class="visualization">
+      <svg id="tree-svg" width="1080" height="1040" viewBox="0 0 1080 1040" role="img">
+        <g id="tree-stage" transform="translate(40, 20) scale(1)">
+          {''.join(class_ring_paths)}
+          {''.join(paths)}
+          <circle id="tip-focus-ring" class="tip-focus-ring" cx="0" cy="0" r="18"></circle>
+        </g>
+      </svg>
+      <aside class="legend-sidebar" aria-label="Figure legends">
+        <section>
+          <h2 class="side-legend-title">Clade</h2>
+          {class_legend_items}
+        </section>
+        <section class="accuracy-key">
+          <h2 class="side-legend-title">Prediction accuracy</h2>
+          <div class="accuracy-scale-wrap">
+            <div class="accuracy-gradient"></div>
+            <div class="accuracy-labels">
+              <span>1.00</span>
+              <span>0.75</span>
+              <span>0.50</span>
+              <span>0.25</span>
+              <span>0.00</span>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
   </div>
   <div id="tooltip"></div>
   <script>
@@ -497,7 +593,7 @@ def write_interactive_html(
     const treeStage = document.getElementById("tree-stage");
     const tipFocusRing = document.getElementById("tip-focus-ring");
     const treeSvg = document.getElementById("tree-svg");
-    const defaultTransform = "translate(60, 20) scale(1)";
+    const defaultTransform = "translate(40, 20) scale(1)";
     const focusScale = 2.35;
     let pinnedTipKey = null;
     let pinnedTooltipText = null;
@@ -506,15 +602,16 @@ def write_interactive_html(
       const rect = treeSvg.getBoundingClientRect();
       return {{
         rect,
-        scaleX: rect.width / 1120,
+        scaleX: rect.width / 1080,
         scaleY: rect.height / 1040,
       }};
     }}
 
     function getScreenCenter() {{
+      const rect = treeSvg.getBoundingClientRect();
       return {{
-        x: window.innerWidth / 2,
-        y: window.innerHeight / 2,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
       }};
     }}
 
