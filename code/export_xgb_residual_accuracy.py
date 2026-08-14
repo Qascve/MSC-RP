@@ -64,7 +64,15 @@ def load_prediction_table(predictions_path: Path) -> pd.DataFrame:
     df = df[[*required, *optional]].copy()
     df["tip_label"] = df["taxon_name"].map(taxon_to_tip_label)
     df["accuracy"] = fold_accuracy(df["y_true"], df["xgboost"])
-    return df.dropna(subset=["tip_label", "accuracy"]).drop_duplicates("tip_label", keep="last")
+    df = df.dropna(subset=["tip_label", "accuracy"]).copy()
+    aggregations: dict[str, str] = {
+        "taxon_name": "first",
+        "y_true": "mean",
+        "xgboost": "mean",
+        "accuracy": "mean",
+        **{column: "first" for column in optional},
+    }
+    return df.groupby("tip_label", as_index=False, sort=False).agg(aggregations)
 
 
 def load_tip_accuracy(predictions_path: Path) -> dict[str, float]:
@@ -100,6 +108,13 @@ def accuracy_to_color(value: float) -> str:
     if value <= 0.5:
         return interpolate_color(LOW_COLOR, MID_COLOR, value / 0.5)
     return interpolate_color(MID_COLOR, HIGH_COLOR, (value - 0.5) / 0.5)
+
+
+def pdf_accuracy_to_color(value: float) -> str:
+    if not np.isfinite(value):
+        return MISSING_COLOR
+    value = float(np.clip(value, 0.0, 1.0))
+    return mcolors.to_hex(plt.get_cmap("viridis")(value))
 
 
 def annotate_clade(clade: PhyloXML.Clade, tip_accuracy: dict[str, float]) -> float:
@@ -265,9 +280,9 @@ def clade_tooltip(
         lines = [
             f"Species: {str(record.get('taxon_name', clade.name.replace('_', ' ')))}",
             f"Class: {str(record.get('class', 'NA'))}",
-            f"Accuracy: {format_number(accuracy)}",
-            f"Observed log10(BMR): {format_number(record.get('y_true'))}",
-            f"XGB prediction (log10(BMR)): {format_number(record.get('xgboost'))}",
+            f"Mean accuracy: {format_number(accuracy)}",
+            f"Mean observed log10(BMR): {format_number(record.get('y_true'))}",
+            f"Mean XGB prediction (log10(BMR)): {format_number(record.get('xgboost'))}",
         ]
     else:
         lines = [
@@ -679,46 +694,36 @@ def write_static_pdf(
     for parent in tree.find_clades(order="level"):
         for child in parent.clades:
             accuracy = clade_accuracy_cache[id(child)]
-            color = accuracy_to_color(accuracy)
+            color = pdf_accuracy_to_color(accuracy)
             x_values, y_values = circular_edge_points(
                 radius_by_clade[id(parent)],
                 angle_by_clade[id(parent)],
                 radius_by_clade[id(child)],
                 angle_by_clade[id(child)],
             )
-            ax.plot(x_values, y_values, color=color, linewidth=0.55, alpha=0.88)
+            ax.plot(x_values, y_values, color=color, linewidth=2.5, alpha=0.88)
 
-    cmap = mcolors.LinearSegmentedColormap.from_list(
-        "prediction_accuracy",
-        [LOW_COLOR, MID_COLOR, HIGH_COLOR],
-    )
+    cmap = plt.get_cmap("viridis")
     sm = ScalarMappable(cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=1))
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, fraction=0.022, pad=0.01)
     cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
-    # Legend title above the colorbar; +4 pt vs previous defaults (title 14→18, legend ~10→14).
     cbar.ax.set_title(
         "Prediction\naccuracy",
-        fontsize=14,
-        fontweight="bold",
-        pad=10,
+        fontsize=12,
+        fontweight="normal",
+        pad=8,
     )
-    cbar.ax.tick_params(labelsize=14)
+    cbar.ax.tick_params(labelsize=12)
     for tick_label in cbar.ax.get_yticklabels():
-        tick_label.set_fontweight("bold")
+        tick_label.set_fontweight("normal")
 
-    ax.set_title(
-        "XGB residual-learning accuracy across test-set species",
-        fontsize=18,
-        fontweight="bold",
-        pad=18,
-    )
     ax.set_aspect("equal")
     ax.axis("off")
     ax.set_xlim(-500, 500)
     ax.set_ylim(-500, 500)
     fig.tight_layout()
-    cbar.ax.set_position([0.935, 0.24, 0.018, 0.52])
+    cbar.ax.set_position([0.92, 0.08, 0.012, 0.26])
     fig.savefig(output_path, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 

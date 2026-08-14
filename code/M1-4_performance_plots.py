@@ -42,10 +42,10 @@ def save_grouped_metric_bars(
     plt.rcParams.update(
         {
             "font.family": "sans-serif",
-            "font.size": 24,
-            "font.weight": "bold",
-            "axes.labelweight": "bold",
-            "axes.titleweight": "bold",
+            "font.size": 30,
+            "font.weight": "normal",
+            "axes.labelweight": "normal",
+            "axes.titleweight": "normal",
             "axes.linewidth": 1.2,
         }
     )
@@ -90,14 +90,14 @@ def save_grouped_metric_bars(
                 label=model,
             )
         ax.set_xticks(x)
-        ax.set_xticklabels(tick_labels, fontsize=24, fontweight="bold")
-        ax.set_title(title, fontsize=24, fontweight="bold")
-        ax.set_ylabel(ylabel, fontsize=24, fontweight="bold")
+        ax.set_xticklabels(tick_labels, fontsize=30, fontweight="normal")
+        ax.set_title(title, fontsize=30, fontweight="normal")
+        ax.set_ylabel(ylabel, fontsize=30, fontweight="normal")
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.tick_params(direction="out", length=7, width=1.2, labelsize=24)
+        ax.tick_params(direction="out", length=7, width=1.2, labelsize=30)
         for tick_label in ax.get_yticklabels():
-            tick_label.set_fontweight("bold")
+            tick_label.set_fontweight("normal")
 
     axes[0].set_ylim(0, 1.05)
     axes[1].set_ylim(0, max(1.05, float(np.nanmax(
@@ -113,7 +113,7 @@ def save_grouped_metric_bars(
         frameon=False,
         fancybox=False,
         edgecolor="black",
-        prop={"size": 24, "weight": "bold"},
+        prop={"size": 30, "weight": "normal"},
         ncol=legend_ncols,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.82))

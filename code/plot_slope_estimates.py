@@ -463,9 +463,9 @@ def save_rmse_r2_comparison_plot(metrics_df: pd.DataFrame, output_path: Path, ti
     sns.set_theme(style="whitegrid")
     with plt.rc_context(
         {
-            "font.weight": "bold",
-            "axes.labelweight": "bold",
-            "axes.titleweight": "bold",
+            "font.weight": "normal",
+            "axes.labelweight": "normal",
+            "axes.titleweight": "normal",
             "figure.titleweight": "bold",
             "font.size": FONT_SIZE,
             "axes.titlesize": TITLE_SIZE,
@@ -696,22 +696,22 @@ def save_slope_plot(
     with plt.rc_context(
         {
             "font.family": "sans-serif",
-            "font.weight": "bold",
-            "axes.labelweight": "bold",
-            "axes.titleweight": "bold",
-            "font.size": 20,
-            "axes.titlesize": 20,
-            "axes.labelsize": 20,
-            "xtick.labelsize": 20,
-            "ytick.labelsize": 20,
-            "legend.fontsize": 20,
+            "font.weight": "normal",
+            "axes.labelweight": "normal",
+            "axes.titleweight": "normal",
+            "font.size": 28,
+            "axes.titlesize": 28,
+            "axes.labelsize": 28,
+            "xtick.labelsize": 28,
+            "ytick.labelsize": 28,
+            "legend.fontsize": 28,
         }
     ):
         fig, (ax_left, ax_right) = plt.subplots(
             1,
             2,
             figsize=(25.0, 12.0),
-            gridspec_kw={"width_ratios": [1.0, 1.0]},
+            gridspec_kw={"width_ratios": [0.4, 0.6]},
         )
 
         # All Animals and class-level estimates use the same visual encoding.
@@ -728,7 +728,7 @@ def save_slope_plot(
             elinewidth=1.2,
             capsize=3,
             markersize=6,
-            label="M2 estimate (95% CI)",
+            label="M2(95% CI)",
             zorder=3,
         )
 
@@ -738,16 +738,16 @@ def save_slope_plot(
             color="#C44E52",
             linestyle="--",
             linewidth=1.6,
-            label=f"M-MTE: b = {REFERENCE_SLOPE:.2f}",
+            label=f"M-MTE",
             zorder=2,
         )
 
         ax_left.set_yticks(y_pos)
-        ax_left.set_yticklabels(labels, fontsize=24, fontweight="bold")
+        ax_left.set_yticklabels(labels, fontsize=28, fontweight="normal")
         ax_left.set_xlabel(
             "Estimated exponent b (M2)",
-            fontsize=24,
-            fontweight="bold",
+            fontsize=28,
+            fontweight="normal",
         )
         ax_left.set_ylabel("")
 
@@ -760,11 +760,11 @@ def save_slope_plot(
             ax_left.text(
                 annotate_x,
                 y,
-                rf"$n={int(row['n_species'])}$",
+                f"n={int(row['n_species'])}",
                 va="center",
                 ha="left",
-                fontsize=24,
-                fontweight="bold",
+                fontsize=28,
+                fontweight="normal",
                 color="#333333",
             )
         ax_left.set_xlim(x_left - 0.05 * span, annotate_x + 0.28 * span)
@@ -772,8 +772,8 @@ def save_slope_plot(
         ax_left.legend(
             loc="center right",
             bbox_to_anchor=(0.8, 0.85),
-            frameon=True,
-            prop={"size": 20, "weight": "bold"},
+            frameon=False,
+            prop={"size": 28, "weight": "normal"},
         )
 
         # Panel B: every training observation, including repeated observations
@@ -841,22 +841,22 @@ def save_slope_plot(
             zorder=4,
         )
         ax_right.set_xlabel(
-            r"$\mathbf{\log_{10}(Mass\ [kg])}$",
-            fontsize=24,
-            fontweight="bold",
+            "log₁₀(Mass)",
+            fontsize=28,
+            fontweight="normal",
         )
         ax_right.set_ylabel(
-            r"$\mathbf{\log_{10}(BMR)}$",
-            fontsize=24,
-            fontweight="bold",
+            "log₁₀(BMR)",
+            fontsize=28,
+            fontweight="normal",
         )
         line_legend = ax_right.legend(
             handles=[m2_handle, mte_handle],
             labels=["M2", "M-MTE"],
             loc="lower right",
             bbox_to_anchor=(0.62, 0.02),
-            frameon=True,
-            prop={"size": 24, "weight": "bold"},
+            frameon=False,
+            prop={"size": 28, "weight": "normal"},
         )
         ax_right.add_artist(line_legend)
         ax_right.legend(
@@ -867,16 +867,16 @@ def save_slope_plot(
             bbox_to_anchor=(0.99, 0.02),
             ncol=1,
             markerscale=6.0,
-            frameon=True,
-            prop={"size": 24, "weight": "bold"},
-            title_fontproperties={"size": 24, "weight": "bold"},
+            frameon=False,
+            prop={"size": 28, "weight": "normal"},
+            title_fontproperties={"size": 28, "weight": "normal"},
         )
 
         for axis in (ax_left, ax_right):
-            axis.tick_params(axis="both", labelsize=24, width=1.4, length=7)
+            axis.tick_params(axis="both", labelsize=28, width=1.4, length=7)
             for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
-                tick_label.set_fontsize(24)
-                tick_label.set_fontweight("bold")
+                tick_label.set_fontsize(28)
+                tick_label.set_fontweight("normal")
         fig.tight_layout(w_pad=2.5)
         fig.savefig(output_path, facecolor="white")
         plt.close(fig)

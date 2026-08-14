@@ -1173,6 +1173,84 @@ def _mean_abs_shap_by_group(
     return out.reset_index(drop=True)
 
 
+def save_combined_grouped_shap_bar(
+    grouped_df: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Plot grouped SHAP importance for residual RF and XGB in one panel."""
+    model_labels = {
+        "random_forest": "Residual-RF",
+        "xgboost": "Residual-XGB",
+    }
+    model_colors = {
+        "random_forest": "#2f6b3a",
+        "xgboost": "#9ccc9a",
+    }
+    group_order = ["Taxonomy Groups", "Phylogeny", "Mass", "Temperature"]
+    required = {"model", "feature_group", "mean_abs_shap"}
+    missing = required.difference(grouped_df.columns)
+    if missing:
+        raise KeyError(f"Grouped SHAP table missing columns: {', '.join(sorted(missing))}")
+
+    plot_df = grouped_df[grouped_df["model"].isin(model_labels)].copy()
+    available_groups = set(plot_df["feature_group"].astype(str))
+    missing_groups = [group for group in group_order if group not in available_groups]
+    if missing_groups:
+        raise ValueError(f"Grouped SHAP table missing groups: {', '.join(missing_groups)}")
+
+    with plt.rc_context(
+        {
+            "font.family": "sans-serif",
+            "font.size": 30,
+            "font.weight": "normal",
+            "axes.labelweight": "normal",
+            "axes.titleweight": "normal",
+            "xtick.labelsize": 30,
+            "ytick.labelsize": 30,
+            "legend.fontsize": 30,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(25, 12))
+        x = np.arange(len(group_order), dtype=float)
+        width = 0.34
+        offsets = (-width / 2, width / 2)
+
+        for offset, model_name in zip(offsets, model_labels):
+            model_values = (
+                plot_df.loc[plot_df["model"].eq(model_name)]
+                .set_index("feature_group")["mean_abs_shap"]
+                .reindex(group_order)
+                .to_numpy(dtype=float)
+            )
+            ax.bar(
+                x + offset,
+                model_values,
+                width,
+                color=model_colors[model_name],
+                edgecolor="black",
+                linewidth=0.7,
+                label=model_labels[model_name],
+            )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(group_order, fontsize=30, fontweight="normal")
+        ax.set_ylabel(r"Mean($|\mathrm{SHAP}|$)", fontsize=30, fontweight="normal")
+        ax.tick_params(axis="both", labelsize=30, direction="out", length=7, width=1.2)
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontweight("normal")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(
+            loc="upper right",
+            frameon=False,
+            prop={"size": 30, "weight": "normal"},
+        )
+        fig.tight_layout()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, facecolor="white")
+        plt.close(fig)
+
+
 def _build_pc_merged_shap_frame(
     shap_values: np.ndarray,
     X: pd.DataFrame,
@@ -1309,31 +1387,7 @@ def save_shap_outputs(
                 class_grouped.insert(0, "model", model_name)
                 all_by_class_frames.append(class_grouped)
 
-        # 1) Grouped bar
-        fig, ax = plt.subplots(figsize=(9, 6))
-        plot_df = grouped_df.sort_values("mean_abs_shap", ascending=True)
-        ax.barh(
-            plot_df["feature_group"].map(_display_group_label),
-            plot_df["mean_abs_shap"],
-            color="#4C72B0",
-        )
-        ax.set_xlabel(
-            "Mean(|SHAP|) over test observations",
-            fontsize=LABEL_SIZE,
-            fontweight="bold",
-        )
-        ax.set_title(
-            f"Grouped SHAP importance ({model_name})",
-            fontsize=TITLE_SIZE,
-            fontweight="bold",
-        )
-        ax.tick_params(axis="both", labelsize=TICK_SIZE)
-        apply_bold_fonts(ax)
-        fig.tight_layout()
-        fig.savefig(out_dir / f"shap_summary_bar_{model_name}.pdf", bbox_inches="tight")
-        plt.close(fig)
-
-        # 2) Raw bar: 8 classes + phylogeny + mass + temperature
+        # 1) Raw bar: 8 classes + phylogeny + mass + temperature
         fig, ax = plt.subplots(figsize=(9, max(6.0, 0.35 * len(raw_imp) + 2.0)))
         plot_raw = raw_imp.sort_values("mean_abs_shap", ascending=True)
         ax.barh(plot_raw["feature"], plot_raw["mean_abs_shap"], color="#4C72B0")
@@ -1360,7 +1414,7 @@ def save_shap_outputs(
         )
         plt.close(fig)
 
-        # 3) Beeswarm: signed SHAP; PC1–PC5 summed into phylogeny.
+        # 2) Beeswarm: signed SHAP; PC1–PC5 summed into phylogeny.
         # Use shap.plots.beeswarm (returns Axes when show=False). Legacy
         # shap.summary_plot is often typed as NoReturn via plt.show().
         shap_merged, X_merged, _ = _build_pc_merged_shap_frame(shap_values, X_test_res)
@@ -1419,8 +1473,13 @@ def save_shap_outputs(
             out_dir / "shap_feature_importance.csv", index=False, encoding="utf-8"
         )
     if all_grouped_frames:
-        pd.concat(all_grouped_frames, ignore_index=True).to_csv(
+        grouped_output = pd.concat(all_grouped_frames, ignore_index=True)
+        grouped_output.to_csv(
             out_dir / "shap_grouped_importance.csv", index=False, encoding="utf-8"
+        )
+        save_combined_grouped_shap_bar(
+            grouped_output,
+            out_dir / "shap_summary_bar_residual_models.pdf",
         )
     if all_raw_frames:
         pd.concat(all_raw_frames, ignore_index=True).to_csv(
@@ -1441,9 +1500,11 @@ def save_shap_outputs(
                 "Per test row, each feature gets a signed SHAP contribution to",
                 "predicted log10(BMR): positive pushes up, negative pushes down.",
                 "",
-                "Six plots (3 types × random_forest / xgboost):",
-                "- shap_summary_bar_{model}.pdf: fully grouped Mean(|SHAP|)",
-                "  (taxonomy_class, phylogeny, mass, temperature)",
+                "Five plots: one combined grouped bar plus two model-specific",
+                "raw-feature bars and two model-specific beeswarms:",
+                "- shap_summary_bar_residual_models.pdf: Residual-RF and",
+                "  Residual-XGB grouped Mean(|SHAP|) in one panel",
+                "  (taxonomy groups, phylogeny, mass, temperature)",
                 "- shap_summary_bar_raw_features_{model}.pdf: Mean(|SHAP|) with",
                 "  8 class_* features + phylogeny (PC1–PC5) + mass + temperature",
                 "- shap_summary_beeswarm_{model}.pdf: signed SHAP beeswarm;",

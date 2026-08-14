@@ -944,6 +944,56 @@ def write_explore_ml_species_accuracy(out_dir: Path, fold_tags: list[str]) -> Pa
     return out_path
 
 
+def write_m3_ml_r2_by_class(out_dir: Path, fold_tag: str = "test") -> Path:
+    """Write observation-level (micro) M3-RF/XGB R² within each test clade."""
+    pred_path = out_dir / fold_tag / "explore_ml_predictions_test.csv"
+    if not pred_path.exists():
+        raise FileNotFoundError(pred_path)
+
+    pred_df = pd.read_csv(pred_path)
+    required = [
+        "taxon_name",
+        "class",
+        "y_true",
+        "random_forest_m3",
+        "xgboost_m3",
+    ]
+    missing = [column for column in required if column not in pred_df.columns]
+    if missing:
+        raise KeyError(
+            f"{pred_path.name} missing required columns: {', '.join(missing)}"
+        )
+
+    rows: list[dict[str, object]] = []
+    for class_name, group in pred_df.groupby("class", sort=True):
+        y_true = pd.to_numeric(group["y_true"], errors="coerce").to_numpy(dtype=float)
+        rf_pred = pd.to_numeric(
+            group["random_forest_m3"], errors="coerce"
+        ).to_numpy(dtype=float)
+        xgb_pred = pd.to_numeric(
+            group["xgboost_m3"], errors="coerce"
+        ).to_numpy(dtype=float)
+        rf_metrics = evaluate(y_true, rf_pred)
+        xgb_metrics = evaluate(y_true, xgb_pred)
+        rows.append(
+            {
+                "class": str(class_name),
+                "n_species": int(group["taxon_name"].nunique()),
+                "n_obs": int(len(group)),
+                "m3_rf_r2": rf_metrics["r2"],
+                "m3_xgb_r2": xgb_metrics["r2"],
+            }
+        )
+
+    result = pd.DataFrame(rows).sort_values("class").reset_index(drop=True)
+    out_path = out_dir / fold_tag / "m3_ml_r2_by_class.csv"
+    result.to_csv(out_path, index=False, encoding="utf-8")
+    print(
+        f"[M3 RF/XGB class R2] classes={len(result)}, split={fold_tag} -> {out_path}"
+    )
+    return out_path
+
+
 def discover_fold_splits(split_dir: Path, folds: list[str]) -> list[tuple[str, Path, Path]]:
     found: list[tuple[str, Path, Path]] = []
     for name in folds:
@@ -999,6 +1049,7 @@ def main() -> None:
         cv_splits=cv_splits,
     )
     write_explore_ml_species_accuracy(out_dir, ["test"])
+    write_m3_ml_r2_by_class(out_dir, "test")
     print(f"\nWrote explore_ml test results under: {out_dir}/test/")
     print(f"HP search log: {out_dir}/explore_ml_hp_search_trials.csv")
 
