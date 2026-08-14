@@ -55,36 +55,25 @@ def build_summary(data: pd.DataFrame) -> pd.DataFrame:
     return summary
 
 
-def autopct_for_large_slices(values: pd.Series):
-    percentages = values / values.sum() * 100
-    index = iter(percentages)
+def draw_pie(summary: pd.DataFrame, output_path: Path) -> None:
+    # Match the sorted-class tab10 mapping used in slope_estimates Panel B.
+    class_levels = sorted(summary["class"].astype(str).unique())
+    palette = list(plt.colormaps["tab10"].colors)
+    class_colors = {
+        class_name: palette[index]
+        for index, class_name in enumerate(class_levels)
+    }
+    colors = [class_colors[str(class_name)] for class_name in summary["class"]]
 
-    def format_slice(_: float) -> str:
-        percentage = next(index)
-        return f"{percentage:.1f}%" if percentage >= 2 else ""
-
-    return format_slice
-
-
-def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> None:
-    colors = list(plt.colormaps["tab20"].colors)
-    if len(summary) > len(colors):
-        colors = [plt.colormaps["turbo"](i / len(summary)) for i in range(len(summary))]
-
-    fig, ax = plt.subplots(figsize=(13.333, 7.5), facecolor="white")
-    wedges, _, autotexts = ax.pie(
+    fig, ax = plt.subplots(figsize=(25, 12), facecolor="white")
+    wedges, _ = ax.pie(
         summary["observations"],
-        colors=colors[: len(summary)],
+        colors=colors,
         startangle=90,
         counterclock=False,
         labels=None,
-        autopct=autopct_for_large_slices(summary["observations"]),
-        pctdistance=0.72,
         wedgeprops={"edgecolor": "white", "linewidth": 1.2},
-        textprops={"fontsize": 8, "color": "black", "weight": "bold"},
     )
-    for text in autotexts:
-        text.set_path_effects([])
 
     legend_labels = [
         f"{row['class']}  {int(row['observations']):,} ({row['share_percent']:.2f}%)"
@@ -97,26 +86,14 @@ def draw_pie(summary: pd.DataFrame, total_species: int, output_path: Path) -> No
         loc="center left",
         bbox_to_anchor=(1.0, 0.5),
         frameon=False,
-        fontsize=20,
-        title_fontsize=20,
+        fontsize=28,
+        title_fontsize=28,
         labelspacing=0.65,
         handlelength=1.2,
     )
-    ax.set_title("Observations by clade", fontsize=25, weight="bold", pad=18)
-    ax.text(
-        0.5,
-        0.02,
-        f"Total: {summary['observations'].sum():,} observations · "
-        f"{total_species:,} species · {len(summary)} classes",
-        transform=fig.transFigure,
-        ha="center",
-        va="bottom",
-        fontsize=25,
-        color="#404040",
-    )
     ax.axis("equal")
-    fig.subplots_adjust(left=0.03, right=0.72, top=0.88, bottom=0.08)
-    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
+    fig.subplots_adjust(left=0.03, right=0.72, top=0.98, bottom=0.02)
+    fig.savefig(output_path, facecolor="white")
     plt.close(fig)
 
 
@@ -138,7 +115,7 @@ def main() -> None:
     summary_path = output_dir / "dataset_class_summary.csv"
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig", float_format="%.4f")
     chart_path = output_dir / "class_observation_share_pie.pdf"
-    draw_pie(summary, total_species, chart_path)
+    draw_pie(summary, chart_path)
 
     overview_path = output_dir / "dataset_overview.txt"
     lines = [

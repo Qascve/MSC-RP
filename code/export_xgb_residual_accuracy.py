@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.cm import ScalarMappable
+from matplotlib.patches import Patch, Wedge
 import numpy as np
 import pandas as pd
 from Bio import Phylo
@@ -114,7 +115,7 @@ def pdf_accuracy_to_color(value: float) -> str:
     if not np.isfinite(value):
         return MISSING_COLOR
     value = float(np.clip(value, 0.0, 1.0))
-    return mcolors.to_hex(plt.get_cmap("viridis")(value))
+    return mcolors.to_hex(plt.get_cmap("viridis_r")(value))
 
 
 def annotate_clade(clade: PhyloXML.Clade, tip_accuracy: dict[str, float]) -> float:
@@ -685,12 +686,46 @@ def write_interactive_html(
 def write_static_pdf(
     tree: Phylo.BaseTree.Tree,
     tip_accuracy: dict[str, float],
+    tip_records: dict[str, dict[str, object]],
     output_path: Path,
 ) -> None:
     radius_by_clade, angle_by_clade, _descendant_counts = assign_clade_layout(tree)
     clade_accuracy_cache = {id(clade): clade_accuracy(clade, tip_accuracy) for clade in tree.find_clades()}
+    terminals = tree.get_terminals()
+    class_levels = sorted(
+        {
+            str(tip_records.get(tip.name, {}).get("class"))
+            for tip in terminals
+            if pd.notna(tip_records.get(tip.name, {}).get("class"))
+        }
+    )
+    # Match the sorted-class tab10 mapping used in slope_estimates Panel B.
+    class_palette = list(plt.colormaps["tab10"].colors)
+    class_colors = {
+        class_name: mcolors.to_hex(class_palette[index])
+        for index, class_name in enumerate(class_levels)
+    }
 
     fig, ax = plt.subplots(figsize=(10, 10))
+    # One outer annular bar per species, coloured by its taxonomic class.
+    angle_width = 360.0 / max(len(terminals), 1)
+    for tip in terminals:
+        class_name = str(tip_records.get(tip.name, {}).get("class", ""))
+        if class_name not in class_colors:
+            continue
+        center_angle = math.degrees(angle_by_clade[id(tip)])
+        ax.add_patch(
+            Wedge(
+                (0.0, 0.0),
+                486.0,
+                center_angle - 0.48 * angle_width,
+                center_angle + 0.48 * angle_width,
+                width=22.0,
+                facecolor=class_colors[class_name],
+                edgecolor="none",
+            )
+        )
+
     for parent in tree.find_clades(order="level"):
         for child in parent.clades:
             accuracy = clade_accuracy_cache[id(child)]
@@ -703,7 +738,7 @@ def write_static_pdf(
             )
             ax.plot(x_values, y_values, color=color, linewidth=2.5, alpha=0.88)
 
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap("viridis_r")
     sm = ScalarMappable(cmap=cmap, norm=mcolors.Normalize(vmin=0, vmax=1))
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, fraction=0.022, pad=0.01)
@@ -717,6 +752,22 @@ def write_static_pdf(
     cbar.ax.tick_params(labelsize=12)
     for tick_label in cbar.ax.get_yticklabels():
         tick_label.set_fontweight("normal")
+
+    class_handles = [
+        Patch(facecolor=class_colors[class_name], edgecolor="none", label=class_name)
+        for class_name in class_levels
+    ]
+    ax.legend(
+        handles=class_handles,
+        title="Clade",
+        loc="upper left",
+        bbox_to_anchor=(1.0, 1.0),
+        frameon=False,
+        fontsize=11,
+        title_fontsize=12,
+        labelspacing=0.4,
+        handlelength=1.2,
+    )
 
     ax.set_aspect("equal")
     ax.axis("off")
@@ -788,7 +839,7 @@ def main() -> None:
     matched_tips = prune_to_predicted_tips(tree, tip_accuracy)
     write_species_accuracy_table(tree, tip_accuracy, species_output_path)
     write_interactive_html(tree, tip_accuracy, tip_records, html_output_path)
-    write_static_pdf(tree, tip_accuracy, pdf_output_path)
+    write_static_pdf(tree, tip_accuracy, tip_records, pdf_output_path)
     phylogeny = PhyloXML.Phylogeny.from_tree(tree)
     annotate_clade(phylogeny.root, tip_accuracy)
 
